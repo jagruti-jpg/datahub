@@ -17,6 +17,7 @@ Browser (AIChatButton) --POST /api/ai/chat--> Orchestrator (this) --> Claude API
 ```
 
 Files:
+
 - `main.py` — FastAPI server, SSE endpoint, config endpoints
 - `agent.py` — model-agnostic agent loop (tool-use cycle)
 - `datahub_tools.py` — tool definitions + GraphQL executors
@@ -36,6 +37,7 @@ uvicorn main:app --port 8000 --reload
 ```
 
 Test:
+
 ```bash
 curl -N -X POST http://localhost:8000/api/ai/chat \
   -H "Content-Type: application/json" \
@@ -44,3 +46,20 @@ curl -N -X POST http://localhost:8000/api/ai/chat \
 
 The UI (`AIChatButton.tsx`) points at `http://localhost:8000/api/ai/chat` and falls
 back to a mock if the orchestrator is not running.
+
+## Testing the Session API
+
+Create a new session:
+
+```bash
+curl -X POST "http://127.0.0.1:8000/sessions" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "user_id": "user_42",
+    "system_prompt": "You are a helpful DataHub assistant.",
+    "metadata": {"env": "development", "app": "ai-orchestrator"}
+  }'
+
+curl -X  GET "http://127.0.0.1:8000/sessions/9cacfa60-7ad4-417a-acf4-44176d1ea7fe" \
+     -H "Accept: application/json"
+```

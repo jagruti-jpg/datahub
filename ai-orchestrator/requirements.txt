@@ -3,3 +3,5 @@ uvicorn[standard]
 anthropic
 httpx
 pydantic
+
+mysql-connector-python

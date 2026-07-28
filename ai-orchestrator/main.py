@@ -16,14 +16,26 @@ from __future__ import annotations
 import json
 import os
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from agent import run_agent
+from mcp_tools import get_mcp, shutdown_mcp
 
-app = FastAPI(title="DataHub AI Orchestrator")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Warm the MCP session so the first chat isn't slow.
+    await get_mcp()
+    yield
+    await shutdown_mcp()
+
+
+app = FastAPI(title="DataHub AI Orchestrator", lifespan=lifespan)
 
 # Allow the Vite dev server (localhost:3000) and Docker frontend (9002) to call us.
 app.add_middleware(

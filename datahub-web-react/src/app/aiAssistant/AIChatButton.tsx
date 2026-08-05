@@ -1,15 +1,23 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import styled, { keyframes } from 'styled-components';
 
 import { resolveRuntimePath } from '@utils/runtimeBasePath';
 
+import datahubLogo from '@images/datahublogo.svg';
+
 // ─── Animations ────────────────────────────────────────────────────────────────
 
 const slideIn = keyframes`
     from { opacity: 0; transform: translateY(20px) scale(0.95); }
     to   { opacity: 1; transform: translateY(0) scale(1); }
+`;
+
+// Nudge the greeting bubble in from the right so it feels like it "pops" next to the button.
+const bubbleIn = keyframes`
+    from { opacity: 0; transform: translateX(12px); }
+    to   { opacity: 1; transform: translateX(0); }
 `;
 
 // ─── Floating Button ────────────────────────────────────────────────────────────
@@ -31,12 +39,69 @@ const FloatingButton = styled.button<{ $isOpen: boolean }>`
     display: flex;
     align-items: center;
     justify-content: center;
-    transition: background 0.2s, transform 0.2s, box-shadow 0.2s;
+    transition:
+        background 0.2s,
+        transform 0.2s,
+        box-shadow 0.2s;
 
     &:hover {
         background: #5c4fcf;
         transform: scale(1.08);
         box-shadow: 0 6px 20px rgba(92, 79, 207, 0.55);
+    }
+`;
+
+// DataHub mark shown inside the floating button (replaces the old robot emoji).
+// White circle keeps the multi-color logo legible on the purple button.
+const ButtonLogo = styled.img`
+    width: 30px;
+    height: 30px;
+    border-radius: 50%;
+    background: #ffffff;
+    padding: 3px;
+`;
+
+// Greeting bubble that pops next to the button while the chat is closed.
+const GreetingBubble = styled.div`
+    position: fixed;
+    bottom: 40px;
+    right: 92px;
+    z-index: 9999;
+    max-width: 220px;
+    padding: 10px 14px;
+    background: #ffffff;
+    color: #37324d;
+    font-size: 13px;
+    line-height: 1.4;
+    border-radius: 14px 14px 2px 14px;
+    box-shadow: 0 6px 18px rgba(92, 79, 207, 0.28);
+    animation: ${bubbleIn} 0.25s ease-out;
+    cursor: pointer;
+
+    /* little tail pointing toward the button */
+    &::after {
+        content: '';
+        position: absolute;
+        right: -6px;
+        bottom: 10px;
+        width: 12px;
+        height: 12px;
+        background: #ffffff;
+        transform: rotate(45deg);
+        box-shadow: 2px -2px 4px rgba(92, 79, 207, 0.12);
+    }
+`;
+
+const GreetingDismiss = styled.span`
+    position: absolute;
+    top: 4px;
+    right: 6px;
+    font-size: 11px;
+    color: #b0a9c9;
+    line-height: 1;
+
+    &:hover {
+        color: #7c6af7;
     }
 `;
 
@@ -67,13 +132,13 @@ const ChatPanel = styled.div<{
         height: 100vh;
     `
             : p.$x !== null && p.$y !== null
-            ? `
+              ? `
         left: ${p.$x}px;
         top: ${p.$y}px;
         width: ${p.$w}px;
         height: ${p.$h}px;
     `
-            : `
+              : `
         bottom: 92px;
         right: 28px;
         width: ${p.$w}px;
@@ -129,7 +194,10 @@ const CloseBtn = styled.button`
     padding: 2px 6px;
     border-radius: 4px;
     opacity: 0.8;
-    &:hover { opacity: 1; background: rgba(255,255,255,0.15); }
+    &:hover {
+        opacity: 1;
+        background: rgba(255, 255, 255, 0.15);
+    }
 `;
 
 // Model picker lives in the chat panel (not settings) so it can be switched per-conversation.
@@ -142,8 +210,12 @@ const ModelSelect = styled.select`
     padding: 3px 6px;
     margin-top: 4px;
     cursor: pointer;
-    &:focus { outline: none; }
-    option { color: #333; }
+    &:focus {
+        outline: none;
+    }
+    option {
+        color: #333;
+    }
 `;
 
 // Skill picker — same look as the model picker, sits right beside it.
@@ -170,10 +242,7 @@ const MODEL_OPTIONS_BY_ENUM: Record<string, ChatModelOption> = {
     GPT_5_5: { value: 'gpt-5-5', label: 'GPT 5.5' },
 };
 
-const FALLBACK_CHAT_MODELS: ChatModelOption[] = [
-    MODEL_OPTIONS_BY_ENUM.SONNET,
-    MODEL_OPTIONS_BY_ENUM.OPUS,
-];
+const FALLBACK_CHAT_MODELS: ChatModelOption[] = [MODEL_OPTIONS_BY_ENUM.SONNET, MODEL_OPTIONS_BY_ENUM.OPUS];
 
 type PreferredModelResponse = {
     model?: string | null;
@@ -201,7 +270,7 @@ const Message = styled.div<{ $isUser: boolean }>`
     font-size: 13.5px;
     line-height: 1.5;
     align-self: ${({ $isUser }) => ($isUser ? 'flex-end' : 'flex-start')};
-    box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
     /* Wrap long unbreakable tokens (e.g. urn:li:dataset:(...)) so text never
        overflows the bubble/panel when the window is small. */
     overflow-wrap: anywhere;
@@ -214,13 +283,35 @@ const MarkdownContent = styled.div`
     min-width: 0;
     overflow-wrap: anywhere;
     word-break: break-word;
-    & > *:first-child { margin-top: 0; }
-    & > *:last-child { margin-bottom: 0; }
-    p { margin: 0 0 8px; }
-    ul, ol { margin: 0 0 8px; padding-left: 20px; }
-    li { margin: 2px 0; }
-    h1, h2, h3, h4 { margin: 8px 0 4px; font-size: 14px; font-weight: 600; }
-    a { color: #7c6af7; text-decoration: underline; }
+    & > *:first-child {
+        margin-top: 0;
+    }
+    & > *:last-child {
+        margin-bottom: 0;
+    }
+    p {
+        margin: 0 0 8px;
+    }
+    ul,
+    ol {
+        margin: 0 0 8px;
+        padding-left: 20px;
+    }
+    li {
+        margin: 2px 0;
+    }
+    h1,
+    h2,
+    h3,
+    h4 {
+        margin: 8px 0 4px;
+        font-size: 14px;
+        font-weight: 600;
+    }
+    a {
+        color: #7c6af7;
+        text-decoration: underline;
+    }
     code {
         background: #f0f0f5;
         padding: 1px 5px;
@@ -242,15 +333,26 @@ const MarkdownContent = styled.div`
         overflow-wrap: anywhere;
         word-break: break-word;
     }
-    pre code { background: none; padding: 0; }
+    pre code {
+        background: none;
+        padding: 0;
+    }
     table {
         border-collapse: collapse;
         width: 100%;
         font-size: 12px;
         margin: 0 0 8px;
     }
-    th, td { border: 1px solid #e0e0e8; padding: 4px 8px; text-align: left; }
-    th { background: #f7f7fb; font-weight: 600; }
+    th,
+    td {
+        border: 1px solid #e0e0e8;
+        padding: 4px 8px;
+        text-align: left;
+    }
+    th {
+        background: #f7f7fb;
+        font-weight: 600;
+    }
     blockquote {
         border-left: 3px solid #d0d0dc;
         margin: 0 0 8px;
@@ -279,14 +381,20 @@ const ConfirmBtn = styled.button<{ $variant: 'apply' | 'cancel' }>`
     border-radius: 8px;
     cursor: pointer;
     border: 1px solid transparent;
-    transition: background 0.15s, border-color 0.15s, opacity 0.15s;
+    transition:
+        background 0.15s,
+        border-color 0.15s,
+        opacity 0.15s;
 
     ${({ $variant }) =>
         $variant === 'apply'
             ? `background: #7c6af7; color: #fff; &:hover { background: #5c4fcf; }`
             : `background: #fff; color: #c0392b; border-color: #e6c4c0; &:hover { background: #fdf0ef; }`}
 
-    &:disabled { opacity: 0.5; cursor: default; }
+    &:disabled {
+        opacity: 0.5;
+        cursor: default;
+    }
 `;
 
 const TypingIndicator = styled.div`
@@ -296,7 +404,7 @@ const TypingIndicator = styled.div`
     padding: 10px 16px;
     font-size: 20px;
     letter-spacing: 2px;
-    box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
 `;
 
 const InputArea = styled.div`
@@ -323,7 +431,9 @@ const Input = styled.input`
         background: white;
     }
 
-    &::placeholder { color: #aaa; }
+    &::placeholder {
+        color: #aaa;
+    }
 `;
 
 const SendBtn = styled.button`
@@ -341,8 +451,13 @@ const SendBtn = styled.button`
     flex-shrink: 0;
     transition: background 0.2s;
 
-    &:hover { background: #5c4fcf; }
-    &:disabled { background: #ccc; cursor: default; }
+    &:hover {
+        background: #5c4fcf;
+    }
+    &:disabled {
+        background: #ccc;
+        cursor: default;
+    }
 `;
 
 interface ChatMessage {
@@ -360,14 +475,14 @@ interface ChatMessage {
 
 const WELCOME: ChatMessage = {
     id: 0,
-    text: '👋 Hi! I\'m your DataHub AI Assistant. Ask me anything about datasets, schemas, lineage, or privacy risk.',
+    text: "👋 Hi! I'm your DataHub AI Assistant. Ask me anything about datasets, schemas, lineage, or privacy risk.",
     isUser: false,
 };
 
 interface PageContext {
     pageUrl: string;
-    pageType: string;        // e.g. "dataset", "dashboard", "domain", "policy", "home"
-    entityUrn?: string;      // e.g. "urn:li:dataset:(urn:li:dataPlatform:hive,users,PROD)"
+    pageType: string; // e.g. "dataset", "dashboard", "domain", "policy", "home"
+    entityUrn?: string; // e.g. "urn:li:dataset:(urn:li:dataPlatform:hive,users,PROD)"
 }
 
 const getPageContext = (): PageContext => {
@@ -380,8 +495,7 @@ const getPageContext = (): PageContext => {
     };
 };
 
-const AI_CHAT_ENDPOINT =
-    (import.meta as any)?.env?.VITE_AI_CHAT_ENDPOINT || 'http://localhost:8000/api/ai/chat';
+const AI_CHAT_ENDPOINT = (import.meta as any)?.env?.VITE_AI_CHAT_ENDPOINT || 'http://localhost:8000/api/ai/chat';
 
 // Base origin of the orchestrator (derived from the chat endpoint) so we can call /sessions/* too.
 const AI_ORCHESTRATOR_BASE = AI_CHAT_ENDPOINT.replace(/\/api\/ai\/chat\/?$/, '');
@@ -427,6 +541,8 @@ export const AIChatButton: React.FC = () => {
     const [messages, setMessages] = useState<ChatMessage[]>([WELCOME]);
     const [inputText, setInputText] = useState('');
     const [isTyping, setIsTyping] = useState(false);
+    // Greeting bubble next to the button. Shown until the user opens the chat or dismisses it.
+    const [greetingDismissed, setGreetingDismissed] = useState(false);
     // Persist sessionId across page refreshes so the conversation can be restored from the backend.
     // Settable so we can rotate to a brand-new session when the previous one is idle-expired.
     const [sessionId, setSessionId] = useState<string>(() => {
@@ -466,8 +582,7 @@ export const AIChatButton: React.FC = () => {
 
                 // Rows are ordered ASC, so the last one is the most recent message.
                 const lastCreatedMs = parseServerTimestampMs(rows[rows.length - 1]?.created_at);
-                const isIdleExpired =
-                    lastCreatedMs !== null && Date.now() - lastCreatedMs >= SESSION_IDLE_TIMEOUT_MS;
+                const isIdleExpired = lastCreatedMs !== null && Date.now() - lastCreatedMs >= SESSION_IDLE_TIMEOUT_MS;
 
                 if (isIdleExpired) {
                     // Stale conversation — start a fresh session so the UI matches the backend,
@@ -619,9 +734,10 @@ export const AIChatButton: React.FC = () => {
                 const preferredModelData = preferredModelResponse.ok
                     ? ((await preferredModelResponse.json()) as PreferredModelResponse)
                     : null;
-                const nextModels = data.models
-                    ?.map((modelName) => MODEL_OPTIONS_BY_ENUM[modelName])
-                    .filter((option): option is ChatModelOption => Boolean(option)) || [];
+                const nextModels =
+                    data.models
+                        ?.map((modelName) => MODEL_OPTIONS_BY_ENUM[modelName])
+                        .filter((option): option is ChatModelOption => Boolean(option)) || [];
 
                 if (!isMounted || nextModels.length === 0) return;
 
@@ -631,8 +747,8 @@ export const AIChatButton: React.FC = () => {
                     preferredModel && nextModels.some((option) => option.value === preferredModel)
                         ? preferredModel
                         : nextModels.some((option) => option.value === currentModel)
-                        ? currentModel
-                        : nextModels[0].value,
+                          ? currentModel
+                          : nextModels[0].value,
                 );
             } catch {
                 // keep fallback chat models if backend request fails
@@ -688,9 +804,9 @@ export const AIChatButton: React.FC = () => {
                 body: JSON.stringify({
                     message: text,
                     skill_id: selectedSkillId ?? undefined,
-                    model,                        // model chosen in the chat header
-                    context: getPageContext(),   // current page URL + entity type
-                    session_id: sessionId,        // persistent session for conversation memory
+                    model, // model chosen in the chat header
+                    context: getPageContext(), // current page URL + entity type
+                    session_id: sessionId, // persistent session for conversation memory
                 }),
             });
 
@@ -723,18 +839,14 @@ export const AIChatButton: React.FC = () => {
                         // under this bubble instead of requiring the user to type "yes".
                         if (evt.confirm) {
                             setMessages((prev) =>
-                                prev.map((m) =>
-                                    m.id === aiMsgId ? { ...m, awaitingConfirm: true } : m,
-                                ),
+                                prev.map((m) => (m.id === aiMsgId ? { ...m, awaitingConfirm: true } : m)),
                             );
                             continue;
                         }
                         if (typeof evt.token !== 'string') continue;
                         accumulated += evt.token;
                         // Update the message bubble live as each token arrives
-                        setMessages((prev) =>
-                            prev.map((m) => (m.id === aiMsgId ? { ...m, text: accumulated } : m)),
-                        );
+                        setMessages((prev) => prev.map((m) => (m.id === aiMsgId ? { ...m, text: accumulated } : m)));
                     } catch {
                         // skip malformed lines
                     }
@@ -743,10 +855,7 @@ export const AIChatButton: React.FC = () => {
         } catch {
             // ── Fallback to mock if backend is unavailable ───────────────────
             setTimeout(() => {
-                setMessages((prev) => [
-                    ...prev,
-                    { id: Date.now() + 1, text: getMockResponse(), isUser: false },
-                ]);
+                setMessages((prev) => [...prev, { id: Date.now() + 1, text: getMockResponse(), isUser: false }]);
                 setIsTyping(false);
             }, 1200);
         }
@@ -758,9 +867,7 @@ export const AIChatButton: React.FC = () => {
 
     // Resolve a message's confirm buttons so they hide and can't be re-clicked.
     const resolveConfirm = (msgId: number | string) => {
-        setMessages((prev) =>
-            prev.map((m) => (m.id === msgId ? { ...m, confirmResolved: true } : m)),
-        );
+        setMessages((prev) => prev.map((m) => (m.id === msgId ? { ...m, confirmResolved: true } : m)));
     };
 
     // Apply / Cancel send a canned instruction; the backend gate then runs apply
@@ -810,7 +917,9 @@ export const AIChatButton: React.FC = () => {
                         title="Drag to move · double-click to expand"
                     >
                         <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap' }}>
-                            <HeaderTitle>🤖 DataHub AI Assistant</HeaderTitle>
+                            <HeaderTitle>
+                                <ButtonLogo src={datahubLogo} alt="" /> DataHub AI Assistant
+                            </HeaderTitle>
                             <div style={{ display: 'flex', alignItems: 'center', gap: '0' }}>
                                 <ModelSelect
                                     value={model}
@@ -900,21 +1009,40 @@ export const AIChatButton: React.FC = () => {
                         </SendBtn>
                     </InputArea>
 
-                    {!maximized && (
-                        <ResizeHandle
-                            onMouseDown={handleResizeMouseDown}
-                            title="Drag to resize"
-                        />
-                    )}
+                    {!maximized && <ResizeHandle onMouseDown={handleResizeMouseDown} title="Drag to resize" />}
                 </ChatPanel>
+            )}
+
+            {!isOpen && !greetingDismissed && (
+                <GreetingBubble
+                    onClick={() => {
+                        setGreetingDismissed(true);
+                        setIsOpen(true);
+                    }}
+                    title="Open AI Assistant"
+                >
+                    <GreetingDismiss
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            setGreetingDismissed(true);
+                        }}
+                        title="Dismiss"
+                    >
+                        ✕
+                    </GreetingDismiss>
+                    👋 What can I help you with today?
+                </GreetingBubble>
             )}
 
             <FloatingButton
                 $isOpen={isOpen}
-                onClick={() => setIsOpen((prev) => !prev)}
+                onClick={() => {
+                    setGreetingDismissed(true);
+                    setIsOpen((prev) => !prev);
+                }}
                 title="Open AI Assistant"
             >
-                {isOpen ? '✕' : '🤖'}
+                {isOpen ? '✕' : <ButtonLogo src={datahubLogo} alt="DataHub AI Assistant" />}
             </FloatingButton>
         </>
     );

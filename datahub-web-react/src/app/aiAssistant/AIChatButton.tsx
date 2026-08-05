@@ -146,6 +146,22 @@ const ModelSelect = styled.select`
     option { color: #333; }
 `;
 
+// Skill picker — same look as the model picker, sits right beside it.
+const SkillSelect = styled.select`
+    background: rgba(255, 255, 255, 0.15);
+    color: white;
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    border-radius: 6px;
+    font-size: 11px;
+    padding: 3px 6px;
+    margin-top: 4px;
+    margin-left: 6px;
+    cursor: pointer;
+    max-width: 140px;
+    &:focus { outline: none; }
+    option { color: #333; }
+`;
+
 type ChatModelOption = { value: string; label: string };
 
 const MODEL_OPTIONS_BY_ENUM: Record<string, ChatModelOption> = {
@@ -427,6 +443,11 @@ export const AIChatButton: React.FC = () => {
     const [availableModels, setAvailableModels] = useState<ChatModelOption[]>(FALLBACK_CHAT_MODELS);
     const [model, setModel] = useState(FALLBACK_CHAT_MODELS[0].value);
 
+    // ── Skill selection ───────────────────────────────────────────────────────
+    type Skill = { id: string; name: string; skill: string; is_default: boolean };
+    const [skills, setSkills] = useState<Skill[]>([]);
+    const [selectedSkillId, setSelectedSkillId] = useState<string | null>(null);
+
     // Restore prior conversation from the backend on mount (survives page refresh via persisted sessionId).
     // If the last message is older than the idle timeout, the backend has already dropped that
     // session's context, so we rotate to a brand-new session and show a fresh (welcome-only) chat.
@@ -625,6 +646,26 @@ export const AIChatButton: React.FC = () => {
         };
     }, []);
 
+    // Fetch available skills on mount (and whenever the panel opens) so the dropdown is populated.
+    useEffect(() => {
+        let isMounted = true;
+        fetch(resolveRuntimePath('/api/skills'))
+            .then((r) => r.ok ? r.json() : [])
+            .then((data: Skill[]) => {
+                if (!isMounted || !Array.isArray(data)) return;
+                setSkills(data);
+                // Pre-select the Default skill so the UI reflects the actual behaviour.
+                const defaultSkill = data.find((s) => s.is_default);
+                if (defaultSkill && selectedSkillId === null) {
+                    setSelectedSkillId(defaultSkill.id);
+                }
+            })
+            .catch(() => {});
+        return () => { isMounted = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [isOpen]);
+
+
     const sendMessage = async (overrideText?: string, displayText?: string) => {
         // overrideText lets the confirm buttons send a canned message ("Yes, apply…")
         // without going through the input box. displayText lets the visible user
@@ -646,6 +687,7 @@ export const AIChatButton: React.FC = () => {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     message: text,
+                    skill_id: selectedSkillId ?? undefined,
                     model,                        // model chosen in the chat header
                     context: getPageContext(),   // current page URL + entity type
                     session_id: sessionId,        // persistent session for conversation memory
@@ -767,19 +809,43 @@ export const AIChatButton: React.FC = () => {
                         onDoubleClick={toggleMaximize}
                         title="Drag to move · double-click to expand"
                     >
-                        <div>
+                        <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap' }}>
                             <HeaderTitle>🤖 DataHub AI Assistant</HeaderTitle>
-                            <ModelSelect
-                                value={model}
-                                onChange={(e) => void handleModelChange(e.target.value)}
-                                title="Choose the model for this conversation"
-                            >
-                                {availableModels.map((m) => (
-                                    <option key={m.value} value={m.value}>
-                                        {m.label}
-                                    </option>
-                                ))}
-                            </ModelSelect>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '0' }}>
+                                <ModelSelect
+                                    value={model}
+                                    onChange={(e) => void handleModelChange(e.target.value)}
+                                    title="Choose the model for this conversation"
+                                >
+                                    {availableModels.map((m) => (
+                                        <option key={m.value} value={m.value}>
+                                            {m.label}
+                                        </option>
+                                    ))}
+                                </ModelSelect>
+                                {skills.length > 0 && (
+                                    <SkillSelect
+                                        value={selectedSkillId ?? ''}
+                                        onChange={(e) => {
+                                            const newSkillId = e.target.value;
+                                            setSelectedSkillId(newSkillId);
+                                            // Reset session so the new skill's system prompt
+                                            // is not contaminated by history from the prior skill.
+                                            const fresh = crypto.randomUUID();
+                                            window.localStorage.setItem('datahub-ai-session-id', fresh);
+                                            setSessionId(fresh);
+                                            setMessages([WELCOME]);
+                                        }}
+                                        title="Choose the skill (system prompt) for this conversation"
+                                    >
+                                        {skills.map((s) => (
+                                            <option key={s.id} value={s.id}>
+                                                {s.name}
+                                            </option>
+                                        ))}
+                                    </SkillSelect>
+                                )}
+                            </div>
                         </div>
                         <CloseBtn onClick={() => setIsOpen(false)}>✕</CloseBtn>
                     </PanelHeader>

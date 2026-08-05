@@ -1,0 +1,74 @@
+# Full AI stack for DataHub: the MCP server + the orchestrator, together.
+# GMS, MySQL, and OpenSearch run in the separate DataHub quickstart project and
+# are reached on the host via host.docker.internal.
+#
+#   cd ai-orchestrator
+#   cp .env.example .env      # fill in ANTHROPIC_API_KEY + DATAHUB_GMS_TOKEN
+#   docker compose up -d --build
+#
+# Then open the DataHub UI and use the 🤖 chat button.
+services:
+  # ── DataHub MCP server (read + write tools, auto-discovered by the agent) ──
+  datahub-mcp-server:
+    build:
+      context: ./mcp-server
+    environment:
+      # GMS lives in the datahub quickstart project, published on the host.
+      DATAHUB_GMS_URL: "http://host.docker.internal:8080"
+      DATAHUB_GMS_TOKEN: "${DATAHUB_GMS_TOKEN:-}"
+      DATAHUB_TELEMETRY_ENABLED: "false"
+      # Opt in to write tools (tags/owners) — needed for PII tagging.
+      TOOLS_IS_MUTATION_ENABLED: "true"
+    extra_hosts:
+      - "host.docker.internal:host-gateway" # reach host ports on Linux
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import socket; socket.create_connection(('127.0.0.1', 8000), 2).close()",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ── AI Orchestrator (FastAPI agent loop + session memory + PII write-back) ──
+  ai-orchestrator:
+    build:
+      context: .
+    depends_on:
+      datahub-mcp-server:
+        condition: service_healthy
+    environment:
+      # Claude API key — required.
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      # Reach the MCP server over the compose network (service name = hostname).
+      DATAHUB_MCP_URL: "http://datahub-mcp-server:8000/mcp"
+      # GMS + MySQL run on the host (DataHub quickstart project).
+      DATAHUB_GMS_URL: "http://host.docker.internal:8080"
+      DATAHUB_GMS_TOKEN: "${DATAHUB_GMS_TOKEN:-}"
+      DB_HOST: "host.docker.internal"
+      DB_PORT: "3306"
+      DB_USER: "datahub"
+      DB_PASSWORD: "datahub"
+    ports:
+      # Published so the browser (VITE_AI_CHAT_ENDPOINT) can reach it.
+      - "8000:8000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s

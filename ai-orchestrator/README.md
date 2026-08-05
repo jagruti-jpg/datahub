@@ -40,9 +40,38 @@ PII tagging (see [Column-level PII tagging](#column-level-pii-tagging)):
 - `local_tools.py` — what the model may call, and the confirmation gate
 - `bootstrap/` — `seed_tags.py`, `tag_state.py`, `try_tagger.py`
 
-## Run locally
+## Run in Docker (recommended)
+
+Runs the **MCP server + orchestrator together** in one command. GMS, MySQL, and
+OpenSearch run in the separate DataHub quickstart project and are reached on the
+host via `host.docker.internal`.
 
 Prerequisite: a running DataHub — `scripts/dev/datahub-dev.sh start`.
+
+```bash
+cd ai-orchestrator
+cp .env.example .env        # fill in ANTHROPIC_API_KEY + DATAHUB_GMS_TOKEN
+docker compose up -d --build
+docker compose ps           # both services should become healthy
+```
+
+The orchestrator is published on `http://localhost:8000` (what the browser's
+`VITE_AI_CHAT_ENDPOINT` points at). Tear down with `docker compose down`.
+
+| File | Purpose |
+| --- | --- |
+| `Dockerfile` | Builds the orchestrator (FastAPI) image |
+| `docker-compose.yml` | Full stack: `datahub-mcp-server` + `ai-orchestrator` |
+| `.dockerignore` | Keeps `.env`, `.venv`, logs out of the image |
+| `.env.example` | Template for the required secrets |
+
+> The orchestrator talks to the MCP server over the compose network at
+> `http://datahub-mcp-server:8000/mcp` — no per-request subprocess, no telemetry stall.
+
+## Run locally (bare Python)
+
+For iterating on the orchestrator with `--reload`. Prerequisite: a running
+DataHub — `scripts/dev/datahub-dev.sh start`.
 
 ### 1. Secrets
 

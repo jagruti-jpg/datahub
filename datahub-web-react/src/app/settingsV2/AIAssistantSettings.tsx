@@ -249,6 +249,10 @@ const getErrorMessage = async (response: Response): Promise<string> => {
     }
 };
 
+type Skill = { id: string; name: string; skill: string; is_default: boolean };
+
+const resolveSkillsPath = (path: string) => path;
+
 export const AIAssistantSettings = () => {
     const [providers, setProviders] = useState<string[]>([]);
     const [provider, setProvider] = useState('');
@@ -540,6 +544,202 @@ export const AIAssistantSettings = () => {
                 )}
                 {errorMessage && <StatusBadge $success={false}>{errorMessage}</StatusBadge>}
             </ButtonRow>
+
+            {/* ── Skills Management ───────────────────────────────────────── */}
+            <SkillsSection />
         </PageContainer>
+    );
+};
+
+const SkillsSection: React.FC = () => {
+    const [skills, setSkills] = useState<Skill[]>([]);
+    const [newSkillName, setNewSkillName] = useState('');
+    const [newSkillPrompt, setNewSkillPrompt] = useState('');
+    const [addingSkill, setAddingSkill] = useState(false);
+    const [showForm, setShowForm] = useState(false);
+    const [skillMsg, setSkillMsg] = useState<{ text: string; ok: boolean } | null>(null);
+    const [expandedSkillId, setExpandedSkillId] = useState<string | null>(null);
+
+    const loadSkills = () => {
+        fetch(resolveSkillsPath('/api/skills'))
+            .then((r) => r.ok ? r.json() : [])
+            .then((data: Skill[]) => Array.isArray(data) && setSkills(data))
+            .catch(() => {});
+    };
+
+    useEffect(() => { loadSkills(); }, []);
+
+    const handleAddSkill = async () => {
+        if (!newSkillName.trim() || !newSkillPrompt.trim()) return;
+        setAddingSkill(true);
+        setSkillMsg(null);
+        try {
+            const resp = await fetch(resolveSkillsPath('/api/skills'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name: newSkillName.trim(), skill: newSkillPrompt.trim() }),
+            });
+            if (resp.ok) {
+                setNewSkillName('');
+                setNewSkillPrompt('');
+                setShowForm(false);
+                setSkillMsg({ text: 'Skill added successfully.', ok: true });
+                loadSkills();
+            } else {
+                const err = (await resp.json().catch(() => ({}))) as { detail?: string };
+                setSkillMsg({ text: err.detail || 'Failed to add skill.', ok: false });
+            }
+        } catch {
+            setSkillMsg({ text: 'Network error saving skill.', ok: false });
+        } finally {
+            setAddingSkill(false);
+        }
+    };
+
+    const handleDeleteSkill = async (skillId: string) => {
+        setSkillMsg(null);
+        try {
+            const resp = await fetch(resolveSkillsPath(`/api/skills/${skillId}`), { method: 'DELETE' });
+            if (resp.ok) {
+                setSkillMsg({ text: 'Skill deleted.', ok: true });
+                loadSkills();
+            } else {
+                setSkillMsg({ text: 'Failed to delete skill.', ok: false });
+            }
+        } catch {
+            setSkillMsg({ text: 'Network error deleting skill.', ok: false });
+        }
+    };
+
+    return (
+        <>
+            <Divider />
+            <Section>
+                <Label style={{ fontSize: '16px', fontWeight: 700 }}>Skills</Label>
+                <HelpText>
+                    Skills are custom system prompts that shape how the AI Assistant responds.
+                    Select a skill in the chat panel&apos;s ⚙️ menu to apply it to your conversation.
+                    The <strong>Default</strong> skill is always available and cannot be deleted.
+                </HelpText>
+
+                {/* Existing skills list */}
+                {skills.length > 0 && (
+                    <div style={{ marginBottom: '12px' }}>
+                        {skills.map((s) => (
+                            <div key={s.id} style={{ borderBottom: '1px solid #f0f0f0' }}>
+                                {/* Skill row */}
+                                <div
+                                    style={{
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        gap: '8px',
+                                        padding: '8px 0',
+                                    }}
+                                >
+                                    <span style={{ flex: 1, fontWeight: s.is_default ? 600 : 400 }}>
+                                        {s.name}{s.is_default ? ' (Default)' : ''}
+                                    </span>
+                                    {/* View / Hide button */}
+                                    <SaveButton
+                                        onClick={() =>
+                                            setExpandedSkillId((prev) => (prev === s.id ? null : s.id))
+                                        }
+                                        style={{
+                                            padding: '2px 10px',
+                                            fontSize: '12px',
+                                            background: 'transparent',
+                                            border: '1px solid #1677ff',
+                                            color: '#1677ff',
+                                        }}
+                                    >
+                                        {expandedSkillId === s.id ? 'Hide' : 'View'}
+                                    </SaveButton>
+                                    {!s.is_default && (
+                                        <DeleteButton
+                                            onClick={() => void handleDeleteSkill(s.id)}
+                                            style={{ padding: '2px 10px', fontSize: '12px' }}
+                                        >
+                                            Delete
+                                        </DeleteButton>
+                                    )}
+                                </div>
+                                {/* Expanded prompt */}
+                                {expandedSkillId === s.id && (
+                                    <pre
+                                        style={{
+                                            background: '#f8f9fa',
+                                            border: '1px solid #e8e8e8',
+                                            borderRadius: '6px',
+                                            padding: '10px 14px',
+                                            fontSize: '13px',
+                                            whiteSpace: 'pre-wrap',
+                                            wordBreak: 'break-word',
+                                            marginBottom: '8px',
+                                            color: '#444',
+                                            fontFamily: 'monospace',
+                                            maxHeight: '300px',
+                                            overflowY: 'auto',
+                                        }}
+                                    >
+                                        {s.skill}
+                                    </pre>
+                                )}
+                            </div>
+                        ))}
+                    </div>
+                )}
+
+                {/* Add new skill form */}
+                {showForm ? (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                        <Label>Skill Name</Label>
+                        <Input
+                            type="text"
+                            placeholder="e.g. PII Analyst"
+                            value={newSkillName}
+                            onChange={(e) => setNewSkillName(e.target.value)}
+                        />
+                        <Label>System Prompt</Label>
+                        <textarea
+                            placeholder="Enter the custom system prompt for this skill..."
+                            value={newSkillPrompt}
+                            onChange={(e) => setNewSkillPrompt(e.target.value)}
+                            rows={6}
+                            style={{
+                                width: '100%',
+                                padding: '8px 12px',
+                                border: '1px solid #d9d9d9',
+                                borderRadius: '6px',
+                                fontSize: '14px',
+                                resize: 'vertical',
+                                fontFamily: 'inherit',
+                                boxSizing: 'border-box',
+                            }}
+                        />
+                        <ButtonRow style={{ marginTop: '4px' }}>
+                            <SaveButton
+                                onClick={() => void handleAddSkill()}
+                                disabled={addingSkill || !newSkillName.trim() || !newSkillPrompt.trim()}
+                            >
+                                {addingSkill ? 'Saving...' : 'Save Skill'}
+                            </SaveButton>
+                            <DeleteButton onClick={() => { setShowForm(false); setNewSkillName(''); setNewSkillPrompt(''); }}>
+                                Cancel
+                            </DeleteButton>
+                        </ButtonRow>
+                    </div>
+                ) : (
+                    <SaveButton onClick={() => setShowForm(true)} style={{ marginTop: '4px' }}>
+                        + Add New Skill
+                    </SaveButton>
+                )}
+
+                {skillMsg && (
+                    <StatusBadge $success={skillMsg.ok} style={{ marginTop: '8px', display: 'block' }}>
+                        {skillMsg.text}
+                    </StatusBadge>
+                )}
+            </Section>
+        </>
     );
 };

@@ -124,11 +124,21 @@ export default defineConfig(async ({ mode }) => {
         configure: proxyDebugConfig,
     };
 
+    // The AI chat streaming endpoint is served by the ai-orchestrator (:8000),
+    // a standalone service. Route it there (SSE-friendly).
+    const orchestratorProxy = {
+        target: process.env.REACT_APP_ORCHESTRATOR_PROXY_TARGET || 'http://localhost:8000',
+        changeOrigin: true,
+        configure: proxyDebugConfig,
+    };
+
     const proxyOptions = {
         '/logIn': frontendProxy,
         '/authenticate': frontendProxy,
         '/api/v2/graphql': frontendProxy,
         '/api/ai-config': gmsProxy,
+        '/api/ai/chat': orchestratorProxy,
+        '/api/skills': orchestratorProxy,
         '/openapi/v1/tracking/track': frontendProxy,
         '/openapi/v1/files': frontendProxy,
         '/mfe/config': frontendProxy,

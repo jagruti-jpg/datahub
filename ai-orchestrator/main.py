@@ -45,7 +45,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("orchestrator")
 
-from agent import CONFIRM_SENTINEL, DEFAULT_MODEL, run_agent  # noqa: E402
+from agent import CONFIRM_SENTINEL, DEFAULT_MODEL, SYSTEM_PROMPT, run_agent  # noqa: E402
 from mcp_tools import get_mcp, shutdown_mcp  # noqa: E402
 import mysql.connector
 import uuid
@@ -72,6 +72,11 @@ app.add_middleware(
 
 # In-memory model selection store. Provider keys are fetched from GMS at runtime.
 _CONFIG = {"model": DEFAULT_MODEL}
+
+# Name of the built-in skill seeded from agent.py's SYSTEM_PROMPT. Used as the
+# fallback whenever a request omits skill_id or references an unknown skill, and
+# guarded against deletion in the skills CRUD.
+DEFAULT_SKILL_NAME = "Default"
 DATAHUB_GMS_URL = os.environ.get("DATAHUB_GMS_URL", "http://localhost:8080")
 DATAHUB_GMS_TOKEN = os.environ.get("DATAHUB_GMS_TOKEN", "")
 INTERNAL_PROVIDER_KEY_URL = f"{DATAHUB_GMS_URL}/api/ai-config/internal/provider-key"
@@ -82,6 +87,9 @@ class ChatRequest(BaseModel):
     context: dict | None = None
     session_id: Optional[str] = None
     model: Optional[str] = None
+    # Optional selected skill. When omitted or unresolvable, the Default skill's
+    # prompt is used, so existing clients keep working unchanged.
+    skill_id: Optional[str] = None
 
 
 class ConfigRequest(BaseModel):
@@ -184,9 +192,28 @@ async def _summarize_messages(messages: list[dict], api_key: str) -> str:
     return response.content[0].text
 
 
+def _resolve_skill_prompt(skill_id: str | None) -> str | None:
+    """Return the prompt text for the selected skill, or None to use the code
+    default. Any failure (missing row, DB error) falls back to None so chat is
+    never blocked by skill resolution."""
+    if not skill_id:
+        return None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("SELECT skill FROM skills WHERE id = %s", (skill_id,))
+        row = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        return row["skill"] if row else None
+    except Exception:
+        return None
+
+
 @app.post("/api/ai/chat")
 async def chat(req: ChatRequest) -> StreamingResponse:
     selected_model = req.model.strip().lower() if req.model else _CONFIG["model"]
+    skill_prompt = _resolve_skill_prompt(req.skill_id)
     runtime_config = await _get_runtime_ai_config(selected_model)
     if runtime_config["provider"] not in (None, "claude"):
         raise HTTPException(
@@ -321,6 +348,7 @@ async def chat(req: ChatRequest) -> StreamingResponse:
                 api_key=runtime_config["apiKey"],
                 model=selected_model,
                 history=history,
+                system_prompt=skill_prompt,
             ):
                 # The agent emits this sentinel when a fresh PII proposal is awaiting
                 # confirmation. Turn it into a distinct event the UI can render as
@@ -373,6 +401,95 @@ async def save_config(req: ConfigRequest) -> dict:
     return {"status": "saved", "model": _CONFIG["model"], "hasKey": bool(os.environ.get("ANTHROPIC_API_KEY"))}
 
 
+# ---------------------------------------------------------------------------
+# Skills CRUD endpoints
+# ---------------------------------------------------------------------------
+
+class SkillCreate(BaseModel):
+    name: str
+    skill: str
+
+
+class SkillResponse(BaseModel):
+    id: str
+    name: str
+    skill: str
+    is_default: bool
+
+
+@app.get("/api/skills", response_model=List[SkillResponse])
+def list_skills():
+    """Return all skills (Default first, then alphabetical)."""
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute("SELECT id, name, skill, is_default FROM skills ORDER BY is_default DESC, name ASC")
+    rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return [SkillResponse(**r) for r in rows]
+
+
+@app.post("/api/skills", response_model=SkillResponse, status_code=status.HTTP_201_CREATED)
+def create_skill(skill: SkillCreate):
+    """Create a new user-defined skill."""
+    if skill.name.strip().lower() == DEFAULT_SKILL_NAME.lower():
+        raise HTTPException(status_code=400, detail=f"Cannot create a skill named '{DEFAULT_SKILL_NAME}' — it is built-in.")
+    skill_id = str(uuid.uuid4())
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO skills (id, name, skill, is_default) VALUES (%s, %s, %s, 0)",
+        (skill_id, skill.name.strip(), skill.skill),
+    )
+    conn.commit()
+    cursor.close()
+    conn.close()
+    return SkillResponse(id=skill_id, name=skill.name.strip(), skill=skill.skill, is_default=False)
+
+
+@app.put("/api/skills/{skill_id}", response_model=SkillResponse)
+def update_skill(skill_id: str, skill: SkillCreate):
+    """Update a user-defined skill. The built-in Default skill cannot be renamed or edited here."""
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute("SELECT id, name, skill, is_default FROM skills WHERE id = %s", (skill_id,))
+    row = cursor.fetchone()
+    if not row:
+        cursor.close()
+        conn.close()
+        raise HTTPException(status_code=404, detail="Skill not found.")
+    if row["is_default"]:
+        cursor.close()
+        conn.close()
+        raise HTTPException(status_code=400, detail="The built-in Default skill cannot be edited.")
+    cursor.execute("UPDATE skills SET name = %s, skill = %s WHERE id = %s", (skill.name.strip(), skill.skill, skill_id))
+    conn.commit()
+    cursor.close()
+    conn.close()
+    return SkillResponse(id=skill_id, name=skill.name.strip(), skill=skill.skill, is_default=False)
+
+
+@app.delete("/api/skills/{skill_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_skill(skill_id: str):
+    """Delete a user-defined skill. The built-in Default skill cannot be deleted."""
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute("SELECT is_default FROM skills WHERE id = %s", (skill_id,))
+    row = cursor.fetchone()
+    if not row:
+        cursor.close()
+        conn.close()
+        raise HTTPException(status_code=404, detail="Skill not found.")
+    if row["is_default"]:
+        cursor.close()
+        conn.close()
+        raise HTTPException(status_code=400, detail="The built-in Default skill cannot be deleted.")
+    cursor.execute("DELETE FROM skills WHERE id = %s", (skill_id,))
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+
 def init_db():
     """Reads schema.sql and runs statements on FastAPI startup."""
     sql_file_path = os.path.join(os.path.dirname(__file__), "scripts/schema.sql")
@@ -391,6 +508,19 @@ def init_db():
         statements = [stmt.strip() for stmt in sql_script.split(";") if stmt.strip()]
         for statement in statements:
             cursor.execute(statement)
+
+        # Seed the built-in "Default" skill from the code's SYSTEM_PROMPT. Kept in
+        # sync on every startup so prompt changes in agent.py propagate, while any
+        # user-created skills are left untouched.
+        cursor.execute(
+            """
+            INSERT INTO skills (id, name, skill, is_default)
+            VALUES (%s, %s, %s, 1)
+            ON DUPLICATE KEY UPDATE skill = VALUES(skill), is_default = 1
+            """,
+            (str(uuid.uuid4()), DEFAULT_SKILL_NAME, SYSTEM_PROMPT),
+        )
+
         conn.commit()
         print("Database and tables initialized successfully.")
     except Exception as e:

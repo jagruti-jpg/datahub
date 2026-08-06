@@ -42,23 +42,59 @@ const FloatingButton = styled.button<{ $isOpen: boolean }>`
 
 // ─── Chat Panel ─────────────────────────────────────────────────────────────────
 
-const ChatPanel = styled.div`
+const ChatPanel = styled.div<{
+    $maximized: boolean;
+    $x: number | null;
+    $y: number | null;
+    $w: number;
+    $h: number;
+}>`
     position: fixed;
-    bottom: 92px;
-    right: 28px;
     z-index: 9998;
-    width: 380px;
-    height: 520px;
     background: #ffffff;
-    border-radius: 16px;
+    border-radius: ${(p) => (p.$maximized ? '0' : '16px')};
     box-shadow: 0 8px 40px rgba(0, 0, 0, 0.18);
     display: flex;
     flex-direction: column;
     overflow: hidden;
     animation: ${slideIn} 0.22s ease;
+
+    ${(p) =>
+        p.$maximized
+            ? `
+        inset: 0;
+        width: 100vw;
+        height: 100vh;
+    `
+            : p.$x !== null && p.$y !== null
+            ? `
+        left: ${p.$x}px;
+        top: ${p.$y}px;
+        width: ${p.$w}px;
+        height: ${p.$h}px;
+    `
+            : `
+        bottom: 92px;
+        right: 28px;
+        width: ${p.$w}px;
+        height: ${p.$h}px;
+    `}
 `;
 
-const PanelHeader = styled.div`
+// Bottom-right corner grip to drag-resize the panel to any size.
+const ResizeHandle = styled.div`
+    position: absolute;
+    bottom: 0;
+    right: 0;
+    width: 18px;
+    height: 18px;
+    cursor: nwse-resize;
+    z-index: 9999;
+    background: linear-gradient(135deg, transparent 0 50%, rgba(124, 106, 247, 0.55) 50% 100%);
+    border-bottom-right-radius: 14px;
+`;
+
+const PanelHeader = styled.div<{ $dragging: boolean }>`
     background: linear-gradient(135deg, #7c6af7 0%, #5c4fcf 100%);
     padding: 16px 18px;
     color: white;
@@ -66,6 +102,8 @@ const PanelHeader = styled.div`
     align-items: center;
     justify-content: space-between;
     flex-shrink: 0;
+    cursor: ${(p) => (p.$dragging ? 'grabbing' : 'grab')};
+    user-select: none;
 `;
 
 const HeaderTitle = styled.div`
@@ -137,6 +175,9 @@ const MessagesArea = styled.div`
 
 const Message = styled.div<{ $isUser: boolean }>`
     max-width: 85%;
+    /* Allow the bubble to shrink inside the flex column so it tracks the panel
+       width instead of being forced wide by long content. */
+    min-width: 0;
     padding: 10px 14px;
     border-radius: ${({ $isUser }) => ($isUser ? '16px 16px 4px 16px' : '16px 16px 16px 4px')};
     background: ${({ $isUser }) => ($isUser ? '#7c6af7' : '#ffffff')};
@@ -145,11 +186,18 @@ const Message = styled.div<{ $isUser: boolean }>`
     line-height: 1.5;
     align-self: ${({ $isUser }) => ($isUser ? 'flex-end' : 'flex-start')};
     box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+    /* Wrap long unbreakable tokens (e.g. urn:li:dataset:(...)) so text never
+       overflows the bubble/panel when the window is small. */
+    overflow-wrap: anywhere;
+    word-break: break-word;
 `;
 
 // Renders markdown from the assistant (bold, lists, tables, code, links) inside the chat bubble.
 const MarkdownContent = styled.div`
     /* Tighten spacing so markdown fits the narrow chat panel */
+    min-width: 0;
+    overflow-wrap: anywhere;
+    word-break: break-word;
     & > *:first-child { margin-top: 0; }
     & > *:last-child { margin-bottom: 0; }
     p { margin: 0 0 8px; }
@@ -163,6 +211,10 @@ const MarkdownContent = styled.div`
         border-radius: 4px;
         font-size: 12px;
         font-family: 'SFMono-Regular', Consolas, monospace;
+        /* Long inline tokens like urn:li:dataset:(...) must wrap instead of
+           forcing the bubble wider than the panel. */
+        overflow-wrap: anywhere;
+        word-break: break-word;
     }
     pre {
         background: #f0f0f5;
@@ -170,6 +222,9 @@ const MarkdownContent = styled.div`
         border-radius: 6px;
         overflow-x: auto;
         margin: 0 0 8px;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        word-break: break-word;
     }
     pre code { background: none; padding: 0; }
     table {
@@ -186,6 +241,36 @@ const MarkdownContent = styled.div`
         padding-left: 10px;
         color: #555;
     }
+`;
+
+// Confirmation buttons shown under an assistant bubble when a PII proposal is
+// awaiting the user's yes/no. Keeps the two-step propose→apply flow but replaces
+// the "type yes" chore with one click.
+const ConfirmBar = styled.div`
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 10px;
+`;
+
+const ConfirmBtn = styled.button<{ $variant: 'apply' | 'cancel' }>`
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 6px 12px;
+    font-size: 12.5px;
+    font-weight: 600;
+    border-radius: 8px;
+    cursor: pointer;
+    border: 1px solid transparent;
+    transition: background 0.15s, border-color 0.15s, opacity 0.15s;
+
+    ${({ $variant }) =>
+        $variant === 'apply'
+            ? `background: #7c6af7; color: #fff; &:hover { background: #5c4fcf; }`
+            : `background: #fff; color: #c0392b; border-color: #e6c4c0; &:hover { background: #fdf0ef; }`}
+
+    &:disabled { opacity: 0.5; cursor: default; }
 `;
 
 const TypingIndicator = styled.div`
@@ -245,9 +330,16 @@ const SendBtn = styled.button`
 `;
 
 interface ChatMessage {
-    id: number;
+    id: number | string;
     text: string;
     isUser: boolean;
+    // Set when the backend signals a fresh PII proposal is awaiting confirmation.
+    // Renders Apply/Cancel buttons under this bubble instead of making the
+    // user type "yes". Cleared once the user acts on it (see confirmResolved).
+    awaitingConfirm?: boolean;
+    // True after the user has clicked one of the confirm buttons, so they hide and
+    // can't be double-submitted.
+    confirmResolved?: boolean;
 }
 
 const WELCOME: ChatMessage = {
@@ -275,6 +367,30 @@ const getPageContext = (): PageContext => {
 const AI_CHAT_ENDPOINT =
     (import.meta as any)?.env?.VITE_AI_CHAT_ENDPOINT || 'http://localhost:8000/api/ai/chat';
 
+// Base origin of the orchestrator (derived from the chat endpoint) so we can call /sessions/* too.
+const AI_ORCHESTRATOR_BASE = AI_CHAT_ENDPOINT.replace(/\/api\/ai\/chat\/?$/, '');
+
+// Mirrors SESSION_IDLE_TIMEOUT_MINUTES in the orchestrator (main.py). If more than
+// this long has passed since the last stored message, the backend drops the
+// conversation context — so the UI should start a fresh chat to stay in sync.
+const SESSION_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
+
+// The backend stores created_at in UTC. MySQL typically returns it without a
+// timezone suffix (e.g. "2026-07-31 10:20:00"), which Date.parse would wrongly
+// treat as local time. Normalize to a UTC-anchored value before comparing.
+const parseServerTimestampMs = (raw?: string | null): number | null => {
+    if (!raw) return null;
+    // Already has timezone info (Z or +hh:mm) — parse as-is.
+    if (/[zZ]|[+-]\d{2}:?\d{2}$/.test(raw)) {
+        const t = Date.parse(raw);
+        return Number.isNaN(t) ? null : t;
+    }
+    // No timezone: convert "YYYY-MM-DD HH:MM:SS" → ISO UTC "YYYY-MM-DDTHH:MM:SSZ".
+    const iso = `${raw.replace(' ', 'T')}Z`;
+    const t = Date.parse(iso);
+    return Number.isNaN(t) ? null : t;
+};
+
 const MOCK_RESPONSES: string[] = [
     'The `user_events` table has 6 columns: `user_id`, `event_type`, `timestamp`, `session_id`, `raw_payload`, and `ip_address`. Note that `user_id` and `ip_address` are tagged as PII.',
     'Based on lineage analysis, this dataset has 12 upstream dependencies and feeds into 47 downstream pipelines. Changes here could have broad impact.',
@@ -295,10 +411,173 @@ export const AIChatButton: React.FC = () => {
     const [messages, setMessages] = useState<ChatMessage[]>([WELCOME]);
     const [inputText, setInputText] = useState('');
     const [isTyping, setIsTyping] = useState(false);
-    const [sessionId] = useState<string>(() => crypto.randomUUID());
+    // Persist sessionId across page refreshes so the conversation can be restored from the backend.
+    // Settable so we can rotate to a brand-new session when the previous one is idle-expired.
+    const [sessionId, setSessionId] = useState<string>(() => {
+        try {
+            const saved = window.localStorage.getItem('datahub-ai-session-id');
+            if (saved) return saved;
+            const fresh = crypto.randomUUID();
+            window.localStorage.setItem('datahub-ai-session-id', fresh);
+            return fresh;
+        } catch {
+            return crypto.randomUUID();
+        }
+    });
     const [availableModels, setAvailableModels] = useState<ChatModelOption[]>(FALLBACK_CHAT_MODELS);
     const [model, setModel] = useState(FALLBACK_CHAT_MODELS[0].value);
+
+    // Restore prior conversation from the backend on mount (survives page refresh via persisted sessionId).
+    // If the last message is older than the idle timeout, the backend has already dropped that
+    // session's context, so we rotate to a brand-new session and show a fresh (welcome-only) chat.
+    useEffect(() => {
+        let isMounted = true;
+        (async () => {
+            try {
+                const resp = await fetch(`${AI_ORCHESTRATOR_BASE}/sessions/${sessionId}/messages`);
+                if (!resp.ok) return;
+                const rows = (await resp.json()) as Array<{
+                    role: string;
+                    content: string;
+                    created_at?: string | null;
+                }>;
+                if (!isMounted || !Array.isArray(rows) || rows.length === 0) return;
+
+                // Rows are ordered ASC, so the last one is the most recent message.
+                const lastCreatedMs = parseServerTimestampMs(rows[rows.length - 1]?.created_at);
+                const isIdleExpired =
+                    lastCreatedMs !== null && Date.now() - lastCreatedMs >= SESSION_IDLE_TIMEOUT_MS;
+
+                if (isIdleExpired) {
+                    // Stale conversation — start a fresh session so the UI matches the backend,
+                    // which answers with no memory of the old turns.
+                    const fresh = crypto.randomUUID();
+                    try {
+                        window.localStorage.setItem('datahub-ai-session-id', fresh);
+                    } catch {
+                        // Ignore storage errors (private mode, etc.).
+                    }
+                    if (isMounted) {
+                        setMessages([WELCOME]);
+                        setSessionId(fresh); // triggers this effect again for the fresh (empty) session
+                    }
+                    return;
+                }
+
+                const restored: ChatMessage[] = rows.map((row, idx) => ({
+                    id: `restored-${idx}`,
+                    text: row.content,
+                    isUser: row.role === 'user',
+                }));
+                // Keep the welcome bubble on top, then the restored history.
+                setMessages([WELCOME, ...restored]);
+            } catch {
+                // Backend unreachable or no history — keep the default welcome message.
+            }
+        })();
+        return () => {
+            isMounted = false;
+        };
+    }, [sessionId]);
     const messagesEndRef = useRef<HTMLDivElement>(null);
+    const inputRef = useRef<HTMLInputElement>(null);
+
+    // ── Maximize + drag state ────────────────────────────────────────────────
+    const [maximized, setMaximized] = useState(false);
+    const [position, setPosition] = useState<{ x: number; y: number } | null>(null);
+    const [dragging, setDragging] = useState(false);
+    const dragOffset = useRef<{ dx: number; dy: number }>({ dx: 0, dy: 0 });
+
+    // ── Resize state ─────────────────────────────────────────────────────────
+    const DEFAULT_SIZE = { w: 380, h: 520 };
+    const MIN_SIZE = { w: 300, h: 360 };
+    const [size, setSize] = useState<{ w: number; h: number }>(DEFAULT_SIZE);
+    const [resizing, setResizing] = useState(false);
+    // Anchor captured at resize-start: panel's top-left + the pointer origin.
+    const resizeStart = useRef<{ left: number; top: number; x: number; y: number }>({
+        left: 0,
+        top: 0,
+        x: 0,
+        y: 0,
+    });
+
+    // Start resizing from the bottom-right corner grip (ignored while maximized).
+    const handleResizeMouseDown = (e: React.MouseEvent) => {
+        if (maximized) return;
+        e.preventDefault();
+        e.stopPropagation();
+
+        const panel = (e.currentTarget as HTMLElement).parentElement;
+        if (!panel) return;
+        const rect = panel.getBoundingClientRect();
+        resizeStart.current = { left: rect.left, top: rect.top, x: e.clientX, y: e.clientY };
+        // Pin the panel to its current top-left so it grows/shrinks from the corner.
+        setPosition({ x: rect.left, y: rect.top });
+        setResizing(true);
+    };
+
+    useEffect(() => {
+        if (!resizing) return undefined;
+
+        const handleMove = (e: MouseEvent) => {
+            const { left, top } = resizeStart.current;
+            const maxW = window.innerWidth - left;
+            const maxH = window.innerHeight - top;
+            // New size = pointer position relative to the pinned top-left corner.
+            const nextW = Math.min(Math.max(MIN_SIZE.w, e.clientX - left), maxW);
+            const nextH = Math.min(Math.max(MIN_SIZE.h, e.clientY - top), maxH);
+            setSize({ w: nextW, h: nextH });
+        };
+        const handleUp = () => setResizing(false);
+
+        window.addEventListener('mousemove', handleMove);
+        window.addEventListener('mouseup', handleUp);
+        return () => {
+            window.removeEventListener('mousemove', handleMove);
+            window.removeEventListener('mouseup', handleUp);
+        };
+    }, [resizing]);
+
+    // Double-click the header to toggle full-page mode.
+    const toggleMaximize = () => {
+        setMaximized((prev) => !prev);
+        setPosition(null); // reset any dragged position when toggling
+    };
+
+    // Start dragging from the header (ignored while maximized).
+    const handleHeaderMouseDown = (e: React.MouseEvent) => {
+        if (maximized) return;
+        // Don't start a drag when interacting with buttons/selects in the header.
+        const target = e.target as HTMLElement;
+        if (target.closest('button, select')) return;
+
+        const panel = (e.currentTarget as HTMLElement).parentElement;
+        if (!panel) return;
+        const rect = panel.getBoundingClientRect();
+        dragOffset.current = { dx: e.clientX - rect.left, dy: e.clientY - rect.top };
+        setPosition({ x: rect.left, y: rect.top }); // switch to absolute positioning
+        setDragging(true);
+    };
+
+    useEffect(() => {
+        if (!dragging) return undefined;
+
+        const handleMove = (e: MouseEvent) => {
+            const maxX = window.innerWidth - size.w;
+            const maxY = window.innerHeight - size.h;
+            const nextX = Math.min(Math.max(0, e.clientX - dragOffset.current.dx), Math.max(0, maxX));
+            const nextY = Math.min(Math.max(0, e.clientY - dragOffset.current.dy), Math.max(0, maxY));
+            setPosition({ x: nextX, y: nextY });
+        };
+        const handleUp = () => setDragging(false);
+
+        window.addEventListener('mousemove', handleMove);
+        window.addEventListener('mouseup', handleUp);
+        return () => {
+            window.removeEventListener('mousemove', handleMove);
+            window.removeEventListener('mouseup', handleUp);
+        };
+    }, [dragging, size.w, size.h]);
 
     useEffect(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -346,13 +625,18 @@ export const AIChatButton: React.FC = () => {
         };
     }, []);
 
-    const sendMessage = async () => {
-        const text = inputText.trim();
+    const sendMessage = async (overrideText?: string, displayText?: string) => {
+        // overrideText lets the confirm buttons send a canned message ("Yes, apply…")
+        // without going through the input box. displayText lets the visible user
+        // bubble differ from what's sent to the backend — e.g. show "✕ Cancel"
+        // while the gate still receives "No, do not apply the tags." unchanged.
+        const text = (overrideText ?? inputText).trim();
         if (!text || isTyping) return;
 
-        const userMsg: ChatMessage = { id: Date.now(), text, isUser: true };
+        const bubbleText = (displayText ?? text).trim() || text;
+        const userMsg: ChatMessage = { id: Date.now(), text: bubbleText, isUser: true };
         setMessages((prev) => [...prev, userMsg]);
-        setInputText('');
+        if (overrideText === undefined) setInputText('');
         setIsTyping(true);
 
         try {
@@ -392,8 +676,19 @@ export const AIChatButton: React.FC = () => {
                     const payload = line.slice(6).trim();
                     if (payload === '[DONE]') break;
                     try {
-                        const { token } = JSON.parse(payload) as { token: string };
-                        accumulated += token;
+                        const evt = JSON.parse(payload) as { token?: string; confirm?: boolean };
+                        // A fresh PII proposal is awaiting confirmation → show buttons
+                        // under this bubble instead of requiring the user to type "yes".
+                        if (evt.confirm) {
+                            setMessages((prev) =>
+                                prev.map((m) =>
+                                    m.id === aiMsgId ? { ...m, awaitingConfirm: true } : m,
+                                ),
+                            );
+                            continue;
+                        }
+                        if (typeof evt.token !== 'string') continue;
+                        accumulated += evt.token;
                         // Update the message bubble live as each token arrives
                         setMessages((prev) =>
                             prev.map((m) => (m.id === aiMsgId ? { ...m, text: accumulated } : m)),
@@ -416,7 +711,30 @@ export const AIChatButton: React.FC = () => {
     };
 
     const handleKeyDown = (e: React.KeyboardEvent) => {
-        if (e.key === 'Enter') sendMessage();
+        if (e.key === 'Enter') void sendMessage();
+    };
+
+    // Resolve a message's confirm buttons so they hide and can't be re-clicked.
+    const resolveConfirm = (msgId: number | string) => {
+        setMessages((prev) =>
+            prev.map((m) => (m.id === msgId ? { ...m, confirmResolved: true } : m)),
+        );
+    };
+
+    // Apply / Cancel send a canned instruction; the backend gate then runs apply
+    // (or not) on this next turn — same path as if the user had typed it.
+    const handleConfirmApply = (msgId: number | string) => {
+        if (isTyping) return;
+        resolveConfirm(msgId);
+        // Send the full instruction to the backend gate, but show a compact label
+        // in the user bubble to reflect the button that was clicked.
+        void sendMessage('Yes, apply the tags.', '✓ Apply');
+    };
+
+    const handleConfirmCancel = (msgId: number | string) => {
+        if (isTyping) return;
+        resolveConfirm(msgId);
+        void sendMessage('No, do not apply the tags.', '✕ Cancel');
     };
 
     const handleModelChange = async (nextModel: string) => {
@@ -436,8 +754,19 @@ export const AIChatButton: React.FC = () => {
     return (
         <>
             {isOpen && (
-                <ChatPanel>
-                    <PanelHeader>
+                <ChatPanel
+                    $maximized={maximized}
+                    $x={position?.x ?? null}
+                    $y={position?.y ?? null}
+                    $w={size.w}
+                    $h={size.h}
+                >
+                    <PanelHeader
+                        $dragging={dragging}
+                        onMouseDown={handleHeaderMouseDown}
+                        onDoubleClick={toggleMaximize}
+                        title="Drag to move · double-click to expand"
+                    >
                         <div>
                             <HeaderTitle>🤖 DataHub AI Assistant</HeaderTitle>
                             <ModelSelect
@@ -465,6 +794,26 @@ export const AIChatButton: React.FC = () => {
                                         <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.text}</ReactMarkdown>
                                     </MarkdownContent>
                                 )}
+                                {!msg.isUser && msg.awaitingConfirm && !msg.confirmResolved && (
+                                    <ConfirmBar>
+                                        <ConfirmBtn
+                                            $variant="apply"
+                                            onClick={() => handleConfirmApply(msg.id)}
+                                            disabled={isTyping}
+                                            title="Apply the proposed tags"
+                                        >
+                                            ✓ Apply
+                                        </ConfirmBtn>
+                                        <ConfirmBtn
+                                            $variant="cancel"
+                                            onClick={() => handleConfirmCancel(msg.id)}
+                                            disabled={isTyping}
+                                            title="Don't apply"
+                                        >
+                                            ✕ Cancel
+                                        </ConfirmBtn>
+                                    </ConfirmBar>
+                                )}
                             </Message>
                         ))}
                         {isTyping && <TypingIndicator>···</TypingIndicator>}
@@ -473,16 +822,24 @@ export const AIChatButton: React.FC = () => {
 
                     <InputArea>
                         <Input
+                            ref={inputRef}
                             placeholder="Ask about datasets, schemas, PII..."
                             value={inputText}
                             onChange={(e) => setInputText(e.target.value)}
                             onKeyDown={handleKeyDown}
                             autoFocus
                         />
-                        <SendBtn onClick={sendMessage} disabled={!inputText.trim() || isTyping}>
+                        <SendBtn onClick={() => void sendMessage()} disabled={!inputText.trim() || isTyping}>
                             ➤
                         </SendBtn>
                     </InputArea>
+
+                    {!maximized && (
+                        <ResizeHandle
+                            onMouseDown={handleResizeMouseDown}
+                            title="Drag to resize"
+                        />
+                    )}
                 </ChatPanel>
             )}
 

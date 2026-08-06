@@ -14,9 +14,14 @@ Run:
 from __future__ import annotations
 
 import json
+import logging
 import os
+from datetime import datetime
+from pathlib import Path
 
 import anthropic
+import httpx
+from dotenv import load_dotenv
 
 from contextlib import asynccontextmanager
 
@@ -25,8 +30,23 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any, List
-from agent import run_agent
-from mcp_tools import get_mcp, shutdown_mcp
+
+# Must run before the local imports below: mcp_tools reads DATAHUB_MCP_URL at module
+# scope, and without it the orchestrator silently spawns its own unauthenticated
+# `uvx mcp-server-datahub` over stdio instead of using the HTTP server on :8001.
+load_dotenv(Path(__file__).resolve().parent / ".env")
+
+# uvicorn configures only its own loggers, so without this every logger.info in
+# mcp_tools/pii_* is swallowed and the tool calls are invisible while debugging.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s.%(msecs)03d %(levelname)-7s %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger("orchestrator")
+
+from agent import CONFIRM_SENTINEL, DEFAULT_MODEL, run_agent  # noqa: E402
+from mcp_tools import get_mcp, shutdown_mcp  # noqa: E402
 import mysql.connector
 import uuid
 
@@ -50,14 +70,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# In-memory config store (hackathon only). Production -> DataHub secret manager.
-_CONFIG = {"model": os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5")}
+# In-memory model selection store. Provider keys are fetched from GMS at runtime.
+_CONFIG = {"model": DEFAULT_MODEL}
+DATAHUB_GMS_URL = os.environ.get("DATAHUB_GMS_URL", "http://localhost:8080")
+DATAHUB_GMS_TOKEN = os.environ.get("DATAHUB_GMS_TOKEN", "")
+INTERNAL_PROVIDER_KEY_URL = f"{DATAHUB_GMS_URL}/api/ai-config/internal/provider-key"
 
 
 class ChatRequest(BaseModel):
     message: str
     context: dict | None = None
     session_id: Optional[str] = None
+    model: Optional[str] = None
 
 
 class ConfigRequest(BaseModel):
@@ -65,9 +89,82 @@ class ConfigRequest(BaseModel):
     model: str | None = None
 
 
+def _gms_headers() -> dict[str, str]:
+    headers = {"Content-Type": "application/json"}
+    if DATAHUB_GMS_TOKEN:
+        headers["Authorization"] = f"Bearer {DATAHUB_GMS_TOKEN}"
+    return headers
+
+
+def _env_fallback(selected_model: str) -> dict[str, Any] | None:
+    """The local .env key, when GMS cannot supply one."""
+    if selected_model.startswith("claude-"):
+        provider = "claude"
+        env_api_key = os.environ.get("ANTHROPIC_API_KEY")
+    elif selected_model.startswith(("gpt-", "o1-", "o3-", "o4-")):
+        provider = "openai"
+        env_api_key = os.environ.get("OPENAI_API_KEY")
+    else:
+        return None
+    if not env_api_key:
+        return None
+    return {
+        "model": selected_model,
+        "provider": provider,
+        "apiKey": env_api_key,
+        "hasKey": True,
+        "source": "env-fallback",
+    }
+
+
+async def _get_runtime_ai_config(model: str | None = None) -> dict[str, Any]:
+    selected_model = (model or _CONFIG["model"]).strip().lower()
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.get(
+                INTERNAL_PROVIDER_KEY_URL,
+                headers=_gms_headers(),
+                params={"model": selected_model},
+            )
+    except Exception as exc:
+        fallback = _env_fallback(selected_model)
+        if fallback:
+            return fallback
+        raise HTTPException(status_code=503, detail=f"Failed to reach GMS AI config endpoint: {exc}") from exc
+
+    # A 404 means GMS holds no key for this model, which is not different in practice
+    # from GMS being unreachable — both leave us without one, so both fall back.
+    if response.status_code == 404:
+        fallback = _env_fallback(selected_model)
+        if fallback:
+            logger.info("GMS has no key for %s; using environment fallback.", selected_model)
+            return fallback
+        return {"model": selected_model, "provider": None, "apiKey": None, "hasKey": False}
+    if response.status_code >= 400:
+        detail = response.text
+        raise HTTPException(
+            status_code=502,
+            detail=f"GMS AI config endpoint returned {response.status_code}: {detail}",
+        )
+
+    payload = response.json()
+    return {
+        "model": payload.get("model", selected_model),
+        "provider": payload.get("provider"),
+        "apiKey": payload.get("apiKey"),
+        "hasKey": bool(payload.get("apiKey")),
+    }
+
+
 @app.get("/health")
 async def health() -> dict:
-    return {"status": "ok", "hasKey": bool(os.environ.get("ANTHROPIC_API_KEY"))}
+    return {
+        "status": "ok",
+        "hasKey": bool(
+            os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("OPENAI_API_KEY")
+        ),
+    }
 
 
 # Idle timeout: if a session has had no activity for this many minutes, its
@@ -78,11 +175,12 @@ SESSION_IDLE_TIMEOUT_MINUTES = 10
 SUMMARY_KEEP_RECENT = 6
 # Model used for generating the running summary (cheap + fast).
 SUMMARY_MODEL = "claude-haiku-4-5"
+PII_CLASSIFIER_MODEL = os.environ.get("PII_CLASSIFIER_MODEL", "claude-haiku-4-5")
 
 
-async def _summarize_messages(messages: list[dict]) -> str:
+async def _summarize_messages(messages: list[dict], api_key: str) -> str:
     """Call Claude Haiku to produce a concise summary of old conversation turns."""
-    client = anthropic.AsyncAnthropic()
+    client = anthropic.AsyncAnthropic(api_key=api_key)
     text_turns = "\n".join(
         f"{m['role'].upper()}: {m['content']}" for m in messages
     )
@@ -101,6 +199,16 @@ async def _summarize_messages(messages: list[dict]) -> str:
 
 @app.post("/api/ai/chat")
 async def chat(req: ChatRequest) -> StreamingResponse:
+    selected_model = req.model.strip().lower() if req.model else _CONFIG["model"]
+    runtime_config = await _get_runtime_ai_config(selected_model)
+    try:
+        classifier_config = await _get_runtime_ai_config(PII_CLASSIFIER_MODEL)
+    except HTTPException:
+        classifier_config = {
+            "model": PII_CLASSIFIER_MODEL,
+            "provider": None,
+            "apiKey": None,
+        }
     # Load conversation history from MySQL if a session_id was provided
     history: list[dict] = []
     if req.session_id:
@@ -156,22 +264,37 @@ async def chat(req: ChatRequest) -> StreamingResponse:
                         if existing_summary else []
                     ) + old_messages
 
-                    new_summary = await _summarize_messages(to_summarize)
+                    summary_config = await _get_runtime_ai_config(SUMMARY_MODEL)
+                    if summary_config["apiKey"]:
+                        new_summary = await _summarize_messages(
+                            to_summarize, summary_config["apiKey"]
+                        )
+                    else:
+                        new_summary = existing_summary
 
                     # Persist the updated summary back to sessions table
-                    cursor3 = conn.cursor()
-                    cursor3.execute(
-                        "UPDATE sessions SET summary = %s WHERE id = %s",
-                        (new_summary, req.session_id),
-                    )
-                    conn.commit()
-                    cursor3.close()
+                    if new_summary != existing_summary:
+                        cursor3 = conn.cursor()
+                        cursor3.execute(
+                            "UPDATE sessions SET summary = %s WHERE id = %s",
+                            (new_summary, req.session_id),
+                        )
+                        conn.commit()
+                        cursor3.close()
 
                     # Build history: summary as a synthetic user note + recent turns
-                    history = [
-                        {"role": "user", "content": f"[Conversation summary so far]: {new_summary}"},
-                        {"role": "assistant", "content": "Understood, I have the context from the summary."},
-                    ] + recent_messages
+                    history = recent_messages
+                    if new_summary:
+                        history = [
+                            {
+                                "role": "user",
+                                "content": f"[Conversation summary so far]: {new_summary}",
+                            },
+                            {
+                                "role": "assistant",
+                                "content": "Understood, I have the context from the summary.",
+                            },
+                        ] + recent_messages
                 else:
                     history = all_messages
 
@@ -202,9 +325,33 @@ async def chat(req: ChatRequest) -> StreamingResponse:
     async def event_stream():
         accumulated = ""
         try:
-            async for token in run_agent(req.message, req.context, history=history):
+            if not runtime_config["apiKey"]:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"No API key configured for model {runtime_config['model']}.",
+                )
+
+            async for token in run_agent(
+                req.message,
+                req.context,
+                api_key=runtime_config["apiKey"],
+                model=selected_model,
+                history=history,
+                provider=runtime_config["provider"],
+                classifier_api_key=classifier_config["apiKey"],
+                classifier_provider=classifier_config["provider"],
+                classifier_model=classifier_config["model"],
+            ):
+                # The agent emits this sentinel when a fresh PII proposal is awaiting
+                # confirmation. Turn it into a distinct event the UI can render as
+                # Apply/Cancel/Custom buttons, and keep it out of the saved transcript.
+                if token == CONFIRM_SENTINEL:
+                    yield f"data: {json.dumps({'confirm': True})}\n\n"
+                    continue
                 accumulated += token
                 yield f"data: {json.dumps({'token': token})}\n\n"
+        except HTTPException as exc:
+            yield f"data: {json.dumps({'token': f'[error: {exc.detail}]'})}\n\n"
         except Exception as exc:  # noqa: BLE001
             yield f"data: {json.dumps({'token': f'[error: {exc}]'})}\n\n"
         finally:
@@ -233,17 +380,31 @@ async def chat(req: ChatRequest) -> StreamingResponse:
 
 @app.get("/api/ai-config")
 async def get_config() -> dict:
-    return {"model": _CONFIG["model"], "hasKey": bool(os.environ.get("ANTHROPIC_API_KEY"))}
+    return {
+        "model": _CONFIG["model"],
+        "hasKey": bool(
+            os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("OPENAI_API_KEY")
+        ),
+    }
 
 
 @app.post("/api/ai-config")
 async def save_config(req: ConfigRequest) -> dict:
     if req.model:
-        _CONFIG["model"] = req.model
+        _CONFIG["model"] = req.model.strip().lower()
     if req.apiKey:
         # Hackathon: set in-process env. Production: write to DataHub secret manager.
-        os.environ["ANTHROPIC_API_KEY"] = req.apiKey
-    return {"status": "saved", "model": _CONFIG["model"], "hasKey": bool(os.environ.get("ANTHROPIC_API_KEY"))}
+        if _CONFIG["model"].startswith("claude-"):
+            os.environ["ANTHROPIC_API_KEY"] = req.apiKey
+        elif _CONFIG["model"].startswith(("gpt-", "o1-", "o3-", "o4-")):
+            os.environ["OPENAI_API_KEY"] = req.apiKey
+    return {
+        "status": "saved",
+        "model": _CONFIG["model"],
+        "hasKey": bool(
+            os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("OPENAI_API_KEY")
+        ),
+    }
 
 
 def init_db():
@@ -297,6 +458,10 @@ class MessageResponse(BaseModel):
     role: str
     content: str
     tokens_used: int
+    # Timestamp of when the message was stored (serialized to ISO-8601 by FastAPI).
+    # Used by the frontend to detect an idle session (>10 min since last message)
+    # and start a fresh chat.
+    created_at: Optional[datetime] = None
 
 
 DB_HOST = os.getenv("DB_HOST", "localhost")
@@ -363,7 +528,7 @@ def get_session_messages(session_id: str):
     cursor = conn.cursor(dictionary=True)
     try:
         cursor.execute(
-            "SELECT id, session_id, role, content, tokens_used FROM messages WHERE session_id = %s ORDER BY created_at ASC",
+            "SELECT id, session_id, role, content, tokens_used, created_at FROM messages WHERE session_id = %s ORDER BY created_at ASC",
             (session_id,)
         )
         return cursor.fetchall()

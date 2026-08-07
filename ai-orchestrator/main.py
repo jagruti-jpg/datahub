@@ -436,6 +436,74 @@ async def save_config(req: ConfigRequest) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Multi-provider config endpoints (used by the AI Assistant settings page).
+# The settings UI lists providers and manages a per-provider API key. Keys map
+# to the same env vars the agent reads at runtime.
+# ---------------------------------------------------------------------------
+
+# Provider -> env var holding its API key.
+_PROVIDER_ENV_KEYS = {
+    "claude": "ANTHROPIC_API_KEY",
+    "openai": "OPENAI_API_KEY",
+}
+
+
+class ProviderKeyRequest(BaseModel):
+    provider: str
+    # None/empty clears the stored key (delete).
+    apiKey: str | None = None
+
+
+def _normalize_provider(provider: str) -> str:
+    normalized = (provider or "").strip().lower()
+    if normalized not in _PROVIDER_ENV_KEYS:
+        raise HTTPException(status_code=404, detail=f"Unknown provider '{provider}'.")
+    return normalized
+
+
+def _key_preview(key: str) -> str:
+    # Show only enough to recognize the key without exposing it.
+    if len(key) <= 8:
+        return "•" * len(key)
+    return f"{key[:5]}…{key[-4:]}"
+
+
+@app.get("/api/ai-config/providers")
+async def list_providers() -> dict:
+    return {"providers": list(_PROVIDER_ENV_KEYS.keys())}
+
+
+@app.get("/api/ai-config/api-key")
+async def get_provider_key(provider: str) -> dict:
+    normalized = _normalize_provider(provider)
+    key = os.environ.get(_PROVIDER_ENV_KEYS[normalized]) or ""
+    return {
+        "provider": normalized,
+        "hasKey": bool(key),
+        "updated": False,
+        "keyPreview": _key_preview(key) if key else None,
+    }
+
+
+@app.put("/api/ai-config/api-key")
+async def put_provider_key(req: ProviderKeyRequest) -> dict:
+    normalized = _normalize_provider(req.provider)
+    env_var = _PROVIDER_ENV_KEYS[normalized]
+    if req.apiKey and req.apiKey.strip():
+        # Hackathon: set in-process env. Production: write to DataHub secret manager.
+        os.environ[env_var] = req.apiKey.strip()
+    else:
+        os.environ.pop(env_var, None)
+    key = os.environ.get(env_var) or ""
+    return {
+        "provider": normalized,
+        "hasKey": bool(key),
+        "updated": True,
+        "keyPreview": _key_preview(key) if key else None,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Skills CRUD endpoints
 # ---------------------------------------------------------------------------
 

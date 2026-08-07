@@ -69,6 +69,7 @@ async def run_agent(
     classifier_api_key: str | None = None,
     classifier_provider: str | None = None,
     classifier_model: str = "claude-haiku-4-5",
+    system_prompt: str | None = None,
 ) -> AsyncIterator[str]:
     """
     Run the agentic loop. Yields text tokens as they arrive.
@@ -105,7 +106,10 @@ async def run_agent(
 
         # Rebuilt each iteration so a proposal made mid-turn is named in the prompt;
         # otherwise the model keeps reasoning from "no proposal on record".
-        system = SYSTEM_PROMPT + pii_tagger.pending_prompt_note()
+        # A selected skill overrides the base prompt, but the PII/tool confirmation
+        # note is always appended so tagging behavior is preserved for every skill.
+        base_prompt = system_prompt if system_prompt else SYSTEM_PROMPT
+        system = base_prompt + pii_tagger.pending_prompt_note()
 
         final: ModelTurn | None = None
         async for event in client.stream(

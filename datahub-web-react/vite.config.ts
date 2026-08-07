@@ -124,11 +124,21 @@ export default defineConfig(async ({ mode }) => {
         configure: proxyDebugConfig,
     };
 
+    // The AI chat streaming endpoint is served by the ai-orchestrator (:8000),
+    // a standalone service. Route it there (SSE-friendly).
+    const orchestratorProxy = {
+        target: process.env.REACT_APP_ORCHESTRATOR_PROXY_TARGET || 'http://localhost:8000',
+        changeOrigin: true,
+        configure: proxyDebugConfig,
+    };
+
     const proxyOptions = {
         '/logIn': frontendProxy,
         '/authenticate': frontendProxy,
         '/api/v2/graphql': frontendProxy,
         '/api/ai-config': gmsProxy,
+        '/api/ai/chat': orchestratorProxy,
+        '/api/skills': orchestratorProxy,
         '/openapi/v1/tracking/track': frontendProxy,
         '/openapi/v1/files': frontendProxy,
         '/mfe/config': frontendProxy,
@@ -237,6 +247,16 @@ export default defineConfig(async ({ mode }) => {
             workers: 3, // default is number of CPU cores
             rollupOptions: {
                 output: {
+                    // Emit source maps without inlined sourcesContent. The original source text is
+                    // ~70% of each map's bytes and pushes the largest 'source' map over Cloudflare
+                    // Pages' 25 MiB (26,214,400 byte) per-file limit, which breaks the preview
+                    // deploy Meticulous records against. The mappings + source paths that remain are
+                    // what Meticulous needs to attribute coverage to source files; it fetches the
+                    // original files from the served build rather than reading inlined text. Keeps
+                    // every map well under the limit without splitting app code (static app-code
+                    // splits cut import cycles and cause "cannot access X before initialization"
+                    // TDZ crashes at load).
+                    sourcemapExcludeSources: true,
                     // Split locale JSON files into per-language chunks
                     manualChunks(id: string) {
                         const match = id.match(/\/locales\/([^/]+)\/[^/]+\.json$/);

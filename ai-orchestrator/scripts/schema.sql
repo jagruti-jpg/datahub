@@ -22,3 +22,15 @@ CREATE TABLE IF NOT EXISTS messages (
     FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
     INDEX idx_session_id (session_id)
     );
+
+-- 3. SKILLS TABLE
+-- A "skill" is a named system prompt the chat widget can switch to. The built-in
+-- "Default" row holds the baseline prompt and is protected from deletion in the API.
+CREATE TABLE IF NOT EXISTS skills (
+    id VARCHAR(36) PRIMARY KEY,
+    name VARCHAR(255) NOT NULL UNIQUE,
+    skill TEXT NOT NULL,
+    is_default TINYINT(1) NOT NULL DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);

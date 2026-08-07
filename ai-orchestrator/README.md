@@ -7,6 +7,44 @@ answer back to the UI over SSE.
 
 > Hackathon build. Target is to port this loop into GMS (Java). See SHIPIT-64.
 
+## For judges / quick evaluation
+
+Everything runs locally in Docker; no hosted URL required.
+
+> **Prerequisites:** Docker Desktop with **~10 GB RAM allocated** (Settings → Resources
+> → Memory). The full DataHub stack plus this AI stack will get OOM-killed on the
+> default 8 GB. You also need an **Anthropic (Claude) API key**.
+
+From a clean machine:
+
+```bash
+# 1. Spin up DataHub (GMS + MySQL + OpenSearch + Kafka + frontend)
+pip install acryl-datahub && datahub docker quickstart
+
+# 2. Start the AI stack (MCP server + this orchestrator)
+cd ai-orchestrator
+cp .env.example .env          # set ANTHROPIC_API_KEY (Claude); DATAHUB_GMS_TOKEN optional
+docker compose up -d --build
+docker compose ps             # both services should be "healthy"
+
+# 3. Confirm the agent is live and has a key
+curl -s localhost:8000/health          # -> 200
+curl -s localhost:8000/api/ai-config   # -> {"model":"claude-...","hasKey":true}
+```
+
+Then open the DataHub UI at **http://localhost:9002** (the packaged quickstart
+frontend — recommended for evaluation, no build step needed), log in
+(`datahub` / `datahub`), click the **DataHub logo chat button** (bottom-right), and
+ask e.g. _"What datasets are on Hive?"_ — the agent calls DataHub tools and streams a
+real, metadata-grounded answer.
+
+> Running the frontend from source instead (Vite dev server on `:3000`) requires
+> `./gradlew :datahub-web-react:yarnInstall :datahub-web-react:yarnGenerate` first,
+> otherwise Vite fails on missing generated GraphQL types / npm deps. For evaluation,
+> prefer the `:9002` quickstart UI above.
+
+If anything misbehaves, see [Troubleshooting](#troubleshooting) below.
+
 ## Architecture
 
 ```
@@ -40,9 +78,38 @@ PII tagging (see [Column-level PII tagging](#column-level-pii-tagging)):
 - `local_tools.py` — what the model may call, and the confirmation gate
 - `bootstrap/` — `seed_tags.py`, `tag_state.py`, `try_tagger.py`
 
-## Run locally
+## Run in Docker (recommended)
+
+Runs the **MCP server + orchestrator together** in one command. GMS, MySQL, and
+OpenSearch run in the separate DataHub quickstart project and are reached on the
+host via `host.docker.internal`.
 
 Prerequisite: a running DataHub — `scripts/dev/datahub-dev.sh start`.
+
+```bash
+cd ai-orchestrator
+cp .env.example .env        # fill in ANTHROPIC_API_KEY + DATAHUB_GMS_TOKEN
+docker compose up -d --build
+docker compose ps           # both services should become healthy
+```
+
+The orchestrator is published on `http://localhost:8000` (what the browser's
+`VITE_AI_CHAT_ENDPOINT` points at). Tear down with `docker compose down`.
+
+| File                 | Purpose                                              |
+| -------------------- | ---------------------------------------------------- |
+| `Dockerfile`         | Builds the orchestrator (FastAPI) image              |
+| `docker-compose.yml` | Full stack: `datahub-mcp-server` + `ai-orchestrator` |
+| `.dockerignore`      | Keeps `.env`, `.venv`, logs out of the image         |
+| `.env.example`       | Template for the required secrets                    |
+
+> The orchestrator talks to the MCP server over the compose network at
+> `http://datahub-mcp-server:8000/mcp` — no per-request subprocess, no telemetry stall.
+
+## Run locally (bare Python)
+
+For iterating on the orchestrator with `--reload`. Prerequisite: a running
+DataHub — `scripts/dev/datahub-dev.sh start`.
 
 ### 1. Secrets
 
@@ -97,7 +164,7 @@ back to a mock if the orchestrator is not running.
 ### Test in the browser
 
 1. Open the DataHub UI — `http://localhost:9002` (quickstart) or `http://localhost:3000` (Vite dev)
-2. Log in (`datahub` / `datahub`) and click the 🤖 button (bottom-right)
+2. Log in (`datahub` / `datahub`) and click the DataHub logo chat button (bottom-right)
 3. Run a multi-turn conversation to verify memory:
 
    | #   | Ask                                    | What it proves            |
@@ -108,6 +175,76 @@ back to a mock if the orchestrator is not running.
 
 Responses should stream back in ~2–6s (containerised MCP). If the button shows a
 canned/mock reply, the orchestrator isn't reachable on port 8000.
+
+### Verify it's real (not the mock)
+
+The UI falls back to canned answers when the orchestrator is unreachable, so confirm
+the real agent responds before demoing:
+
+```bash
+# hasKey must be true (the model can authenticate to Claude)
+curl -s localhost:8000/api/ai-config          # -> {"model":"claude-...","hasKey":true}
+
+# A real, streamed answer (data: {"token": ...} lines ending in [DONE])
+curl -s -N -X POST localhost:8000/api/ai/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message":"In one sentence, what is DataHub?","model":"claude-sonnet-5"}'
+```
+
+A stream of `data: {"token": "..."}` chunks = the real agent. A single generic
+sentence unrelated to your question in the UI = the mock (orchestrator down).
+
+## Troubleshooting
+
+### Chat gives canned / wrong answers (mock fallback)
+
+**Cause:** the orchestrator on `:8000` isn't running, so `AIChatButton.tsx` renders a
+stubbed reply that ignores your question. It is **not** a missing API key.
+
+```bash
+docker compose ps                       # is ai-orchestrator "Up (healthy)"?
+docker compose up -d                     # start it if it's only "Created"/exited
+curl -s localhost:8000/health            # -> 200 when live
+docker compose logs -f ai-orchestrator   # look for "MCP connected (N tools)."
+```
+
+### API key: you do NOT need to set it in the UI
+
+The orchestrator resolves the Claude key in this order (`_get_runtime_ai_config` in
+`main.py`):
+
+1. Ask GMS for a provider key (`/api/ai-config/internal/provider-key`), then
+2. **fall back to `ANTHROPIC_API_KEY` from `.env`** (`_env_fallback`).
+
+So if `.env` has a valid `ANTHROPIC_API_KEY`, `GET /api/ai-config` returns
+`hasKey:true` and the UI key field is unnecessary. The UI field only matters when
+there is no env/GMS key.
+
+### DataHub GMS won't start / shows "unhealthy"
+
+If `datahub-datahub-gms-quickstart-1` is `Exited (1)` or stuck on
+`[datahub-wait] Timeout waiting for HTTP http://search:9200`, GMS usually came up
+with **no Docker network** and/or the **Kafka broker was never started**:
+
+```bash
+# Re-attach GMS to the shared network (root cause: it starts with no network)
+docker network connect --alias datahub-gms datahub_network datahub-datahub-gms-quickstart-1
+# Kafka broker is often left in "Created" — start it
+docker start datahub-kafka-broker-1
+# Restart GMS so its startup wait-loop re-runs
+docker restart datahub-datahub-gms-quickstart-1
+```
+
+> Note: GMS's own `/health` can return **503 even when it's working** (a quickstart
+> image quirk), so the Docker `unhealthy` label is misleading. Confirm it's actually
+> up with a real GraphQL call instead:
+>
+> ```bash
+> docker exec datahub-datahub-gms-quickstart-1 sh -c \
+>  'curl -s -X POST http://localhost:8080/api/graphql \
+>   -H "Content-Type: application/json" -H "X-DataHub-Actor: urn:li:corpuser:datahub" \
+>   -d "{\"query\":\"{ me { corpUser { username } } }\"}"'
+> ```
 
 ## Column-level PII tagging
 

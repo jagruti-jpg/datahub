@@ -151,12 +151,13 @@ type ChatModelOption = { value: string; label: string };
 const MODEL_OPTIONS_BY_ENUM: Record<string, ChatModelOption> = {
     SONNET: { value: 'claude-sonnet-5', label: 'Claude Sonnet 5' },
     OPUS: { value: 'claude-opus-4-8', label: 'Claude Opus 4.8' },
-    GPT_5_5: { value: 'gpt-5-5', label: 'GPT 5.5' },
+    GPT_5_5: { value: 'gpt-5.5', label: 'GPT 5.5' },
 };
 
 const FALLBACK_CHAT_MODELS: ChatModelOption[] = [
     MODEL_OPTIONS_BY_ENUM.SONNET,
     MODEL_OPTIONS_BY_ENUM.OPUS,
+    MODEL_OPTIONS_BY_ENUM.GPT_5_5,
 ];
 
 type PreferredModelResponse = {

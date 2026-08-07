@@ -28,6 +28,12 @@ HOSTED_DOCS_ONLY-->
 
 _Enterprise-grade metadata platform enabling discovery, governance, and observability across your entire data ecosystem_
 
+> **🏆 Hackathon build — DataHub AI Assistant.** This fork adds an in-app AI chat that
+> answers questions about your datasets, schemas, lineage, and PII risk using real
+> metadata. **Judges / evaluators: setup and run instructions are in
+> [`ai-orchestrator/README.md`](./ai-orchestrator/README.md)** (start there, not the
+> generic quickstart below).
+
 <p align="center">
   <a href="https://github.com/datahub-project/datahub/actions/workflows/build-and-test.yml">
     <img src="https://github.com/datahub-project/datahub/actions/workflows/build-and-test.yml/badge.svg" alt="Build Status" />

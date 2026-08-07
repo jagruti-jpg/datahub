@@ -9,7 +9,13 @@ answer back to the UI over SSE.
 
 ## For judges / quick evaluation
 
-Everything runs locally in Docker; no hosted URL required. From a clean machine:
+Everything runs locally in Docker; no hosted URL required.
+
+> **Prerequisites:** Docker Desktop with **~10 GB RAM allocated** (Settings → Resources
+> → Memory). The full DataHub stack plus this AI stack will get OOM-killed on the
+> default 8 GB. You also need an **Anthropic (Claude) API key**.
+
+From a clean machine:
 
 ```bash
 # 1. Spin up DataHub (GMS + MySQL + OpenSearch + Kafka + frontend)
@@ -26,9 +32,16 @@ curl -s localhost:8000/health          # -> 200
 curl -s localhost:8000/api/ai-config   # -> {"model":"claude-...","hasKey":true}
 ```
 
-Then open the DataHub UI at **http://localhost:9002**, log in (`datahub` / `datahub`),
-click the 🤖 button, and ask e.g. *"What datasets are on Hive?"* — the agent calls
-DataHub tools and streams a real, metadata-grounded answer.
+Then open the DataHub UI at **http://localhost:9002** (the packaged quickstart
+frontend — recommended for evaluation, no build step needed), log in
+(`datahub` / `datahub`), click the **DataHub logo chat button** (bottom-right), and
+ask e.g. _"What datasets are on Hive?"_ — the agent calls DataHub tools and streams a
+real, metadata-grounded answer.
+
+> Running the frontend from source instead (Vite dev server on `:3000`) requires
+> `./gradlew :datahub-web-react:yarnInstall :datahub-web-react:yarnGenerate` first,
+> otherwise Vite fails on missing generated GraphQL types / npm deps. For evaluation,
+> prefer the `:9002` quickstart UI above.
 
 If anything misbehaves, see [Troubleshooting](#troubleshooting) below.
 
@@ -83,12 +96,12 @@ docker compose ps           # both services should become healthy
 The orchestrator is published on `http://localhost:8000` (what the browser's
 `VITE_AI_CHAT_ENDPOINT` points at). Tear down with `docker compose down`.
 
-| File | Purpose |
-| --- | --- |
-| `Dockerfile` | Builds the orchestrator (FastAPI) image |
+| File                 | Purpose                                              |
+| -------------------- | ---------------------------------------------------- |
+| `Dockerfile`         | Builds the orchestrator (FastAPI) image              |
 | `docker-compose.yml` | Full stack: `datahub-mcp-server` + `ai-orchestrator` |
-| `.dockerignore` | Keeps `.env`, `.venv`, logs out of the image |
-| `.env.example` | Template for the required secrets |
+| `.dockerignore`      | Keeps `.env`, `.venv`, logs out of the image         |
+| `.env.example`       | Template for the required secrets                    |
 
 > The orchestrator talks to the MCP server over the compose network at
 > `http://datahub-mcp-server:8000/mcp` — no per-request subprocess, no telemetry stall.
@@ -151,7 +164,7 @@ back to a mock if the orchestrator is not running.
 ### Test in the browser
 
 1. Open the DataHub UI — `http://localhost:9002` (quickstart) or `http://localhost:3000` (Vite dev)
-2. Log in (`datahub` / `datahub`) and click the 🤖 button (bottom-right)
+2. Log in (`datahub` / `datahub`) and click the DataHub logo chat button (bottom-right)
 3. Run a multi-turn conversation to verify memory:
 
    | #   | Ask                                    | What it proves            |

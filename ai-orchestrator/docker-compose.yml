@@ -6,7 +6,7 @@
 #   cp .env.example .env      # fill in ANTHROPIC_API_KEY + DATAHUB_GMS_TOKEN
 #   docker compose up -d --build
 #
-# Then open the DataHub UI and use the 🤖 chat button.
+# Then open the DataHub UI and use the DataHub logo chat button.
 services:
   # ── DataHub MCP server (read + write tools, auto-discovered by the agent) ──
   datahub-mcp-server:

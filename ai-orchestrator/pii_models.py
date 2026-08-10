@@ -18,6 +18,17 @@ class Source(str, Enum):
     MODEL = "model"
 
 
+class Tier(str, Enum):
+    """What the automated flow is allowed to do with a verdict, on confidence alone.
+
+    Source is deliberately not part of this: rule confidences span 0.7 to 0.97, so
+    "a rule decided it" says nothing reliable about whether it is safe to write unwatched.
+    """
+
+    AUTO = "auto"
+    WEAK = "weak"
+
+
 class Column(BaseModel):
     model_config = ConfigDict(frozen=True)
 

@@ -3,6 +3,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import styled, { keyframes } from 'styled-components';
 
+import { AI_CHAT_ENDPOINT, AI_ORCHESTRATOR_BASE, orchestratorUrl } from '@app/aiAssistant/orchestrator';
 import { resolveRuntimePath } from '@utils/runtimeBasePath';
 
 import datahubLogo from '@images/datahublogo.svg';
@@ -179,6 +180,7 @@ const HeaderTitle = styled.div`
     font-size: 15px;
 `;
 
+// Sits on the floating button so a queued verdict is visible without opening anything.
 const HeaderSubtitle = styled.div`
     font-size: 11px;
     opacity: 0.8;
@@ -495,10 +497,8 @@ const getPageContext = (): PageContext => {
     };
 };
 
-const AI_CHAT_ENDPOINT = (import.meta as any)?.env?.VITE_AI_CHAT_ENDPOINT || 'http://localhost:8000/api/ai/chat';
-
-// Base origin of the orchestrator (derived from the chat endpoint) so we can call /sessions/* too.
-const AI_ORCHESTRATOR_BASE = AI_CHAT_ENDPOINT.replace(/\/api\/ai\/chat\/?$/, '');
+// Both live in orchestrator.ts so the settings page can address the same service; see the
+// note there on why these must be absolute rather than page-relative.
 
 // Mirrors SESSION_IDLE_TIMEOUT_MINUTES in the orchestrator (main.py). If more than
 // this long has passed since the last stored message, the backend drops the
@@ -765,7 +765,7 @@ export const AIChatButton: React.FC = () => {
     // Fetch available skills on mount (and whenever the panel opens) so the dropdown is populated.
     useEffect(() => {
         let isMounted = true;
-        fetch(resolveRuntimePath('/api/skills'))
+        fetch(orchestratorUrl('/api/skills'))
             .then((r) => r.ok ? r.json() : [])
             .then((data: Skill[]) => {
                 if (!isMounted || !Array.isArray(data)) return;

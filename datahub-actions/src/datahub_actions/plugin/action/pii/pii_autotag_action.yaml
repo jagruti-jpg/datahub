@@ -1,0 +1,56 @@
+# Copyright 2021 Acryl Data, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+name: ${DATAHUB_ACTIONS_PII_AUTOTAG_CONSUMER_GROUP_ID:-datahub_pii_autotag_action}
+enabled: ${DATAHUB_ACTIONS_PII_AUTOTAG_ENABLED:-true}
+source:
+  type: "kafka"
+  config:
+    connection:
+      bootstrap: ${KAFKA_BOOTSTRAP_SERVER:-localhost:9092}
+      schema_registry_url: ${SCHEMA_REGISTRY_URL:-http://localhost:8081}
+      consumer_config:
+        max.poll.interval.ms: ${MAX_POLL_INTERVAL_MS:-60000}
+    topic_routes:
+      mcl: ${METADATA_CHANGE_LOG_VERSIONED_TOPIC_NAME:-MetadataChangeLog_Versioned_v1}
+      pe: ${PLATFORM_EVENT_TOPIC_NAME:-PlatformEvent_v1}
+    # Every field this pipeline filters on is a top-level Avro field, so unrelated
+    # messages are dropped before avrogen deserialization rather than after.
+    enable_mcl_pre_deserialization_filter: true
+filters:
+  - type: event_type
+    config:
+      filter:
+        MetadataChangeLogEvent_v1:
+          event:
+            # schemaMetadata, never editableSchemaMetadata: the orchestrator writes the
+            # latter, so triggering on it would make the action feed itself.
+            - entityType: "dataset"
+              aspectName: "schemaMetadata"
+              # RESTATE is excluded — it re-emits an unchanged aspect, so there is no new
+              # column to classify.
+              changeType: ["UPSERT", "CREATE", "CREATE_ENTITY"]
+action:
+  # Fully-qualified class path rather than the `pii_autotag` entry point. Entry points are
+  # read from the dist-info baked into the image, which the bind-mounted source cannot
+  # update; PluginRegistry imports any key containing "." or ":" directly instead.
+  type: "datahub_actions.plugin.action.pii.pii_autotag_action:PiiAutoTagAction"
+  config:
+    orchestrator_url: ${AI_ORCHESTRATOR_URL:-http://host.docker.internal:8000}
+    # Writes are confined further on the orchestrator side by PII_AUTO_APPLY_SCOPE, so
+    # turning this off still does not mean "tag the whole catalog".
+    dry_run: ${PII_AUTOTAG_DRY_RUN:-false}
+    rules_only: ${PII_AUTOTAG_RULES_ONLY:-false}
+    timeout: ${PII_AUTOTAG_TIMEOUT:-30}
+    # auth_token is intentionally unset: the orchestrator's PII endpoints are open today.
+    # Phase 9 adds the bearer check there and wires the token through here.

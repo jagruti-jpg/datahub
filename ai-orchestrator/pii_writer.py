@@ -18,7 +18,7 @@ import urllib.parse
 import httpx
 from pydantic import BaseModel
 
-from pii_taxonomy import PROVENANCE_TAG, tag_urn
+from pii_taxonomy import PROVENANCE_TAG, is_label_tag, tag_urn
 
 logger = logging.getLogger("pii_writer")
 
@@ -129,6 +129,105 @@ async def apply_field_tags(
         len(result.written),
         dataset_urn,
         len(result.unchanged),
+    )
+    return result
+
+
+def strip_field_tags(
+    aspect: dict, tags_by_field: dict[str, list[str]]
+) -> tuple[dict, WriteResult]:
+    """Remove exactly the named tags, leaving everything else on the field alone.
+
+    Pure, like `merge_field_tags`, so the subtraction can be tested without a GMS. This is
+    the inverse of an additive merge and has to be equally conservative: a steward's own
+    tags, descriptions and glossary terms live in the same aspect, and a revert that
+    replaced the aspect wholesale would take them with it.
+    """
+    entries = list(aspect.get("editableSchemaFieldInfo") or [])
+    result = WriteResult()
+    kept: list[dict] = []
+
+    for entry in entries:
+        targets = tags_by_field.get(entry.get("fieldPath"))
+        if targets is None:
+            kept.append(entry)
+            continue
+
+        global_tags = entry.get("globalTags") or {}
+        existing = list(global_tags.get("tags") or [])
+
+        doomed = {tag_urn(name) for name in targets if name != PROVENANCE_TAG}
+        remaining = [item for item in existing if item.get("tag") not in doomed]
+
+        # Provenance goes only when the last AI-applied label on this column goes with it.
+        # Removing it while another label remains would leave a machine-written tag that
+        # nothing downstream can recognise as machine-written.
+        if PROVENANCE_TAG in targets and not any(
+            is_label_tag(item.get("tag", "")) for item in remaining
+        ):
+            provenance = tag_urn(PROVENANCE_TAG)
+            remaining = [item for item in remaining if item.get("tag") != provenance]
+
+        if len(remaining) == len(existing):
+            result.unchanged.append(entry["fieldPath"])
+            kept.append(entry)
+            continue
+
+        result.written.append(entry["fieldPath"])
+        updated = {**entry, "globalTags": {**global_tags, "tags": remaining}}
+
+        # Drop an entry the revert has emptied, so undoing a write leaves the aspect as it
+        # was rather than littered with fieldPaths carrying nothing.
+        if not remaining and set(updated) == {"fieldPath", "globalTags"}:
+            continue
+        kept.append(updated)
+
+    return {"editableSchemaFieldInfo": kept}, result
+
+
+async def remove_field_tags(
+    dataset_urn: str, tags_by_field: dict[str, list[str]]
+) -> WriteResult:
+    """Read the aspect, subtract every column's tags, write once."""
+    if not tags_by_field:
+        return WriteResult()
+
+    url = _aspect_url(dataset_urn)
+    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+        response = await client.get(url, headers=_headers())
+        # Nothing to undo if the aspect was never written. Not an error: a revert of an
+        # already-reverted dataset should be a no-op, not a failure.
+        if response.status_code == 404:
+            logger.info("No %s on %s; nothing to remove", _ASPECT, dataset_urn)
+            return WriteResult()
+        if response.status_code >= 400:
+            raise WriteError(
+                f"Reading {_ASPECT} for {dataset_urn} returned "
+                f"{response.status_code}: {response.text[:200]}"
+            )
+
+        aspect = (response.json() or {}).get("value") or {}
+        stripped, result = strip_field_tags(aspect, tags_by_field)
+        if not result.written:
+            logger.info("No tags to remove from %s", dataset_urn)
+            return result
+
+        written = await client.post(
+            url,
+            headers=_headers(),
+            params={"createIfNotExists": "false"},
+            json={"value": stripped},
+        )
+        if written.status_code >= 400:
+            raise WriteError(
+                f"Writing {_ASPECT} for {dataset_urn} returned "
+                f"{written.status_code}: {written.text[:200]}"
+            )
+
+    logger.info(
+        "Removed tags from %d column(s) on %s in one write",
+        len(result.written),
+        dataset_urn,
     )
     return result
 

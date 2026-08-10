@@ -16,19 +16,35 @@ import time
 
 from pydantic import BaseModel
 
+import pii_store
 import pii_writer
 from pii_classifier import classify
-from pii_models import Column, Source, Verdict
+from pii_models import Column, Source, Tier, Verdict
 from pii_rules import apply_rules
-from pii_taxonomy import DEFAULT_CONFIDENCE_FLOOR, PROVENANCE_TAG, is_taxonomy_tag
+from pii_store import VerdictRecord
+from pii_taxonomy import (
+    DEFAULT_CONFIDENCE_FLOOR,
+    PROVENANCE_TAG,
+    is_taxonomy_tag,
+)
 
 logger = logging.getLogger("pii_tagger")
 
+# The single bar for both flows: what the interactive flow calls "confident" is exactly
+# what the automated flow will write unwatched.
 CONFIDENCE_FLOOR = float(
     os.environ.get("PII_CONFIDENCE_FLOOR", str(DEFAULT_CONFIDENCE_FLOOR))
 )
 PROPOSAL_TTL_SECONDS = float(os.environ.get("PII_PROPOSAL_TTL_SECONDS", "1800"))
 SCHEMA_PAGE_SIZE = 100
+
+# Prefixes of `platform:name` that unattended writes are confined to. Empty means no
+# restriction; see in_scope().
+AUTO_APPLY_SCOPE = tuple(
+    entry.strip()
+    for entry in os.environ.get("PII_AUTO_APPLY_SCOPE", "").split(",")
+    if entry.strip()
+)
 
 _URN_TABLE = re.compile(r"\(([^,]+),(.+),([^,]+)\)$")
 
@@ -59,6 +75,20 @@ class Proposal(BaseModel):
         return [v for v in self.verdicts if v.confidence < CONFIDENCE_FLOOR]
 
 
+class Classified(BaseModel):
+    """One classification pass, before either flow decides what to do with it.
+
+    The interactive flow turns this into a `Proposal` and waits for a human; the
+    automated flow tiers it and writes. Neither policy belongs here.
+    """
+
+    columns: list[Column]
+    verdicts: list[Verdict]
+    already_tagged: dict[str, list[str]] = {}
+    fingerprint: str
+    structural_fingerprint: str
+
+
 _PROPOSALS: dict[str, Proposal] = {}
 
 
@@ -68,11 +98,55 @@ def short_name(dataset_urn: str) -> str:
     return match.group(2) if match else dataset_urn.strip()
 
 
+def platform_of(dataset_urn: str) -> str:
+    """`urn:li:dataset:(urn:li:dataPlatform:mysql,appdb.users,PROD)` -> `mysql`."""
+    match = _URN_TABLE.search(dataset_urn.strip())
+    return match.group(1).rsplit(":", 1)[-1] if match else ""
+
+
+def in_scope(dataset_urn: str, scope: tuple[str, ...] = ()) -> bool:
+    """Whether unattended writes are allowed for this dataset.
+
+    Each scope entry is a prefix of `platform:name`, so `mysql:crm.` covers one database
+    and `mysql:` covers a whole platform.
+
+    An empty scope means everywhere, which is safe only because it is not the gate that
+    stops writes: `dry_run` is, and it defaults on. Requiring two things to be configured
+    before a single tag can be written makes the narrow-rollout case harder without making
+    the dangerous case any less likely.
+    """
+    if not scope:
+        return True
+    key = f"{platform_of(dataset_urn)}:{short_name(dataset_urn)}"
+    return any(key.startswith(prefix) for prefix in scope)
+
+
 def _fingerprint(columns: list[Column]) -> str:
     material = "|".join(
         f"{c.field_path}:{','.join(sorted(c.existing_tags))}" for c in columns
     )
     return hashlib.sha256(material.encode()).hexdigest()[:16]
+
+
+def _structural_fingerprint(columns: list[Column]) -> str:
+    """Schema shape only, deliberately excluding tags.
+
+    `_fingerprint` hashes existing tags, which is right for invalidating a proposal a
+    reviewer is still reading. It is wrong for asking "has the schema changed since we
+    classified this?", because our own tag write mutates the answer — every run after a
+    successful tagging would report a change.
+    """
+    material = "|".join(f"{c.field_path}:{c.native_type}" for c in columns)
+    return hashlib.sha256(material.encode()).hexdigest()[:16]
+
+
+def tier_of(verdict: Verdict, *, floor: float = CONFIDENCE_FLOOR) -> Tier:
+    """What the automated flow may do with one verdict.
+
+    Pure, and the floor is injectable, so calibration can re-tier an already-recorded
+    sample at a different threshold without paying to classify it again.
+    """
+    return Tier.AUTO if verdict.confidence >= floor else Tier.WEAK
 
 
 def _find(dataset_urn: str) -> Proposal | None:
@@ -237,6 +311,68 @@ def _payload(proposal: Proposal, *, reused: bool) -> dict:
     }
 
 
+async def _classify(
+    mcp,
+    *,
+    dataset_urn: str,
+    columns: list[Column],
+    api_key: str,
+    model: str | None = None,
+    provider: str | None = None,
+    rules_only: bool = False,
+) -> Classified:
+    """Rules first, model on whatever they could not settle. Writes nothing, caches nothing.
+
+    Columns are passed in rather than fetched here so the caller can decide, off the same
+    read, whether classifying is worth doing at all — which is what lets the interactive
+    flow reuse a live proposal without paying for the model.
+
+    `rules_only` skips the model entirely. The rule pass is the only part with no
+    per-dataset cost, which is what makes a catalog-wide backfill affordable.
+    """
+    dataset_name = short_name(dataset_urn)
+    already = {
+        c.field_path: [t for t in c.existing_tags if is_taxonomy_tag(t)]
+        for c in columns
+        if c.already_labelled
+    }
+    candidates = [c for c in columns if not c.already_labelled]
+
+    decision = apply_rules(candidates)
+    verdicts = list(decision.verdicts)
+    if decision.residual and not rules_only:
+        description = await _fetch_description(mcp, dataset_urn)
+        verdicts += await classify(
+            dataset_name=dataset_name,
+            dataset_description=description,
+            columns=decision.residual,
+            api_key=api_key,
+            model=model,
+            provider=provider,
+        )
+
+    by_rule = sum(1 for v in verdicts if v.source is Source.RULE)
+    logger.info(
+        "Classified %s: %d columns, %d flagged (%d by rule, %d by model), "
+        "%d skipped as tagged, %d residual sent to model",
+        dataset_name,
+        len(columns),
+        len(verdicts),
+        by_rule,
+        len(verdicts) - by_rule,
+        len(already),
+        len(decision.residual),
+    )
+
+    return Classified(
+        columns=columns,
+        verdicts=verdicts,
+        already_tagged=already,
+        fingerprint=_fingerprint(columns),
+        structural_fingerprint=_structural_fingerprint(columns),
+    )
+
+
 async def propose(
     mcp,
     *,
@@ -253,59 +389,33 @@ async def propose(
     target_urn = existing.dataset_urn if existing is not None else dataset_urn
 
     columns = await _fetch_columns(mcp, target_urn)
-    fingerprint = _fingerprint(columns)
 
     # Reuse a live proposal rather than reclassifying: the model re-proposes more often
     # than it should, and a fresh run would replace the exact rows the user is reading.
     # A changed schema invalidates it, since the reviewed rows no longer describe it.
-    if existing is not None and existing.fingerprint == fingerprint:
+    if existing is not None and existing.fingerprint == _fingerprint(columns):
         logger.info("Reusing pending proposal for %s", existing.dataset_name)
         return _payload(existing, reused=True)
 
-    dataset_name = short_name(target_urn)
-    already = {
-        c.field_path: [t for t in c.existing_tags if is_taxonomy_tag(t)]
-        for c in columns
-        if c.already_labelled
-    }
-    candidates = [c for c in columns if not c.already_labelled]
-
-    decision = apply_rules(candidates)
-    verdicts = list(decision.verdicts)
-    if decision.residual:
-        description = await _fetch_description(mcp, target_urn)
-        verdicts += await classify(
-            dataset_name=dataset_name,
-            dataset_description=description,
-            columns=decision.residual,
-            api_key=api_key,
-            model=model,
-            provider=provider,
-        )
+    result = await _classify(
+        mcp,
+        dataset_urn=target_urn,
+        columns=columns,
+        api_key=api_key,
+        model=model,
+        provider=provider,
+    )
 
     proposal = Proposal(
         dataset_urn=target_urn,
-        dataset_name=dataset_name,
-        total_columns=len(columns),
-        verdicts=verdicts,
-        skipped=already,
-        fingerprint=fingerprint,
+        dataset_name=short_name(target_urn),
+        total_columns=len(result.columns),
+        verdicts=result.verdicts,
+        skipped=result.already_tagged,
+        fingerprint=result.fingerprint,
         created_at=time.time(),
     )
     _PROPOSALS[target_urn] = proposal
-
-    by_rule = sum(1 for v in verdicts if v.source is Source.RULE)
-    logger.info(
-        "Proposed %s: %d columns, %d flagged (%d by rule, %d by model), "
-        "%d skipped as tagged, %d residual sent to model",
-        dataset_name,
-        len(columns),
-        len(verdicts),
-        by_rule,
-        len(verdicts) - by_rule,
-        len(already),
-        len(decision.residual),
-    )
     return _payload(proposal, reused=False)
 
 
@@ -348,5 +458,210 @@ async def apply(
         "written": applied,
         "already_current": result.unchanged,
         "skipped_by_request": sorted(excluded),
+        "provenance_tag": PROVENANCE_TAG,
+    }
+
+
+async def revert(dataset_urn: str, *, resolved_by: str = "revert") -> dict:
+    """Remove every tag the AI applied to this dataset, and nothing else.
+
+    Driven by the ledger rather than by what is on the dataset, because the aspect cannot
+    tell you who applied a tag. Reading `PII.Email` off a column says nothing about whether
+    a steward put it there by hand.
+    """
+    live = pii_store.applied(dataset_urn)
+    dataset_name = short_name(dataset_urn)
+    if not live:
+        return {
+            "dataset": dataset_name,
+            "dataset_urn": dataset_urn,
+            "removed": {},
+            "reverted": 0,
+            "note": "The ledger records no applied verdicts for this dataset.",
+        }
+
+    tags_by_field: dict[str, list[str]] = {}
+    for verdict in live:
+        tags_by_field.setdefault(verdict.field_path, []).extend(
+            pii_writer.tags_for(verdict.label)
+        )
+
+    # Write before marking, the opposite order to applying. If marking fails here the tags
+    # are already gone and the rows still read `applied`, so a repeat revert finds nothing
+    # to remove and simply finishes the bookkeeping. Marking first would strand live tags
+    # under rows that claim to be reverted, with nothing left to drive a retry.
+    result = await pii_writer.remove_field_tags(dataset_urn, tags_by_field)
+
+    reverted: dict[str, list[str]] = {}
+    failed: list[str] = []
+    for verdict in live:
+        try:
+            pii_store.resolve(verdict.id, status="reverted", resolved_by=resolved_by)
+            reverted.setdefault(verdict.field_path, []).append(verdict.label)
+        except pii_store.TransitionError as exc:
+            logger.warning("Could not mark %s reverted: %s", verdict.id, exc)
+            failed.append(verdict.id)
+
+    logger.info(
+        "Reverted %s: cleared %d column(s), marked %d verdict(s)",
+        dataset_name,
+        len(result.written),
+        sum(len(labels) for labels in reverted.values()),
+    )
+
+    return {
+        "dataset": dataset_name,
+        "dataset_urn": dataset_urn,
+        "removed": reverted,
+        "columns_cleared": sorted(result.written),
+        "reverted": sum(len(labels) for labels in reverted.values()),
+        "failed": failed,
+    }
+
+
+# What each tier becomes in the ledger once the write path is live. A dry run overrides
+# both with `would_apply`.
+_TIER_STATUS: dict[Tier, str] = {
+    Tier.AUTO: "applied",
+    Tier.WEAK: "skipped",
+}
+
+
+async def _write_auto_tier(
+    dataset_urn: str, verdicts: list[Verdict]
+) -> tuple[list[str], list[str]]:
+    """Write the auto tier's tags, then reconcile the ledger with what actually landed."""
+    tags_by_field: dict[str, list[str]] = {}
+    for verdict in verdicts:
+        # Accumulated rather than assigned: one column can carry more than one label, and
+        # a dict comprehension would silently keep only the last.
+        tags_by_field.setdefault(verdict.field, []).extend(
+            pii_writer.tags_for(verdict.label)
+        )
+
+    try:
+        result = await pii_writer.apply_field_tags(dataset_urn, tags_by_field)
+    except pii_writer.WriteError:
+        pii_store.mark_failed(dataset_urn, [(v.field, v.label) for v in verdicts])
+        raise
+
+    # `unchanged` counts as landed — the tag is on the column, it was simply already there.
+    live = set(result.written) | set(result.unchanged)
+    stranded = [v for v in verdicts if v.field not in live]
+    if stranded:
+        pii_store.mark_failed(dataset_urn, [(v.field, v.label) for v in stranded])
+        logger.warning(
+            "%d verdict(s) on %s were recorded as applied but did not land; marked failed",
+            len(stranded),
+            short_name(dataset_urn),
+        )
+
+    return sorted(live), sorted({v.field for v in stranded})
+
+
+async def autotag(
+    mcp,
+    *,
+    dataset_urn: str,
+    api_key: str,
+    model: str | None = None,
+    provider: str | None = None,
+    dry_run: bool = True,
+    rules_only: bool = False,
+    created_by: str = "autotag",
+) -> dict:
+    """Classify one dataset with nobody watching and write everything it is confident of.
+
+    The counterpart to `propose`, over the same classification seam but with the opposite
+    policy: no proposal cache, because there is no reviewer whose reading the cache exists
+    to protect, and every verdict is persisted rather than only the ones a human accepts.
+    The ledger is the whole point — an unattended run leaves nothing else behind, and it
+    is what `revert` reads to undo a run, which is the only correction path here.
+
+    The URN is taken as given. Unlike `propose`, this is not called with a string a person
+    typed; it comes from the change event that named the entity.
+    """
+    # Out of scope means classify and record as normal, but write nothing. The verdicts
+    # are still worth having: they are what makes widening the scope an informed decision
+    # rather than a leap.
+    writing = not dry_run and in_scope(dataset_urn, AUTO_APPLY_SCOPE)
+    if not dry_run and not writing:
+        logger.info(
+            "%s is outside PII_AUTO_APPLY_SCOPE; classifying without writing",
+            short_name(dataset_urn),
+        )
+
+    columns = await _fetch_columns(mcp, dataset_urn)
+    result = await _classify(
+        mcp,
+        dataset_urn=dataset_urn,
+        columns=columns,
+        api_key=api_key,
+        model=model,
+        provider=provider,
+        rules_only=rules_only,
+    )
+
+    tiered: dict[Tier, list[Verdict]] = {tier: [] for tier in Tier}
+    for verdict in result.verdicts:
+        tiered[tier_of(verdict)].append(verdict)
+
+    # Recorded before the write, so a crash between the two leaves a row to reconcile
+    # rather than a tag nobody has a record of. Anything the write fails to land is
+    # corrected to `failed` immediately below.
+    recorded = pii_store.record_many(
+        [
+            VerdictRecord(
+                verdict=verdict,
+                tier=tier.value,
+                # A rehearsal must never be mistakable for a tag that exists, so a dry run
+                # records one status for both tiers rather than the real mapping.
+                status=_TIER_STATUS[tier] if writing else "would_apply",
+            )
+            for tier, verdicts in tiered.items()
+            for verdict in verdicts
+        ],
+        dataset_urn=dataset_urn,
+        dataset_name=short_name(dataset_urn),
+        # Structural, not the tag-sensitive fingerprint: this records which schema was
+        # classified, and that has to stay equal to itself after the tags land.
+        schema_fingerprint=result.structural_fingerprint,
+        created_by=created_by,
+    )
+
+    written: list[str] = []
+    failed: list[str] = []
+    if writing and tiered[Tier.AUTO]:
+        written, failed = await _write_auto_tier(dataset_urn, tiered[Tier.AUTO])
+
+    dataset_name = short_name(dataset_urn)
+    logger.info(
+        "Autotagged %s (writing=%s): %d auto, %d below floor; "
+        "ledger +%d new, %d refreshed, %d already resolved",
+        dataset_name,
+        writing,
+        len(tiered[Tier.AUTO]),
+        len(tiered[Tier.WEAK]),
+        recorded.inserted,
+        recorded.updated,
+        recorded.left_resolved,
+    )
+
+    return {
+        "dataset": dataset_name,
+        "dataset_urn": dataset_urn,
+        "columns_scanned": len(result.columns),
+        "already_tagged": result.already_tagged,
+        "dry_run": dry_run,
+        "wrote_tags": writing,
+        "written": sorted(written),
+        "write_failures": sorted(failed),
+        "rules_only": rules_only,
+        "auto": _rows(tiered[Tier.AUTO]),
+        "weak": _rows(tiered[Tier.WEAK]),
+        "counts": {tier.value: len(verdicts) for tier, verdicts in tiered.items()},
+        "recorded": recorded.model_dump(),
+        "schema_fingerprint": result.structural_fingerprint,
+        "confidence_floor": CONFIDENCE_FLOOR,
         "provenance_tag": PROVENANCE_TAG,
     }

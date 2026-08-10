@@ -3,6 +3,7 @@ import styled from 'styled-components';
 import { Eye } from '@phosphor-icons/react/dist/csr/Eye';
 import { EyeSlash } from '@phosphor-icons/react/dist/csr/EyeSlash';
 
+import { orchestratorUrl } from '@app/aiAssistant/orchestrator';
 import { resolveRuntimePath } from '@utils/runtimeBasePath';
 
 const PageContainer = styled.div`
@@ -251,7 +252,10 @@ const getErrorMessage = async (response: Response): Promise<string> => {
 
 type Skill = { id: string; name: string; skill: string; is_default: boolean };
 
-const resolveSkillsPath = (path: string) => path;
+// Skills live on the orchestrator, not GMS, so they need its absolute origin. A relative
+// path only reaches the orchestrator behind the Vite dev server's proxy; served from the
+// datahub-frontend container it lands on GMS and 404s.
+const resolveSkillsPath = orchestratorUrl;
 
 export const AIAssistantSettings = () => {
     const [providers, setProviders] = useState<string[]>([]);

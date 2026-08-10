@@ -46,8 +46,10 @@ logging.basicConfig(
 logger = logging.getLogger("orchestrator")
 
 from agent import CONFIRM_SENTINEL, DEFAULT_MODEL, SYSTEM_PROMPT, run_agent  # noqa: E402
+from db import get_db_connection  # noqa: E402
 from mcp_tools import get_mcp, shutdown_mcp  # noqa: E402
-import mysql.connector
+import pii_tagger  # noqa: E402
+import pii_writer  # noqa: E402
 import uuid
 
 
@@ -95,6 +97,24 @@ class ChatRequest(BaseModel):
 class ConfigRequest(BaseModel):
     apiKey: str | None = None
     model: str | None = None
+
+
+class AutoTagRequest(BaseModel):
+    dataset_urn: str
+    # Defaults on, so a caller that forgets the field classifies without writing. The
+    # dangerous value is the one you have to ask for.
+    dry_run: bool = True
+    # Rules only, no model call. Lets a backfill sweep the catalog for the obvious
+    # columns without a per-dataset bill.
+    rules_only: bool = False
+    # Recorded against every verdict so the ledger says which pipeline produced it,
+    # not just that something automated did.
+    created_by: str = "autotag"
+
+
+class RevertRequest(BaseModel):
+    dataset_urn: str
+    resolved_by: str = "revert"
 
 
 def _gms_headers() -> dict[str, str]:
@@ -406,6 +426,51 @@ async def chat(req: ChatRequest) -> StreamingResponse:
     )
 
 
+@app.post("/api/pii/autotag")
+async def autotag_endpoint(req: AutoTagRequest) -> dict:
+    """Classify a dataset with no human in the loop and record every verdict.
+
+    The callers here are machines — the ingestion action, a backfill — so credentials are
+    resolved per request from GMS instead of riding on a chat session, and nothing touches
+    the interactive flow's proposal cache.
+    """
+    config = await _get_runtime_ai_config(PII_CLASSIFIER_MODEL)
+    if not config["apiKey"] and not req.rules_only:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"No API key configured for {PII_CLASSIFIER_MODEL}. Set one in AI "
+                "settings, or send rules_only=true to classify without the model."
+            ),
+        )
+
+    try:
+        return await pii_tagger.autotag(
+            await get_mcp(),
+            dataset_urn=req.dataset_urn,
+            api_key=config["apiKey"] or "",
+            model=config["model"],
+            # Passed through rather than re-derived from the model name: the key came out
+            # of one provider's record in GMS, and inferring could hand an Anthropic key
+            # to the OpenAI client.
+            provider=config["provider"],
+            dry_run=req.dry_run,
+            rules_only=req.rules_only,
+            created_by=req.created_by,
+        )
+    except (pii_tagger.TaggerError, pii_writer.WriteError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/api/pii/revert")
+async def revert_endpoint(req: RevertRequest) -> dict:
+    """Undo every tag the AI applied to one dataset, leaving human tags in place."""
+    try:
+        return await pii_tagger.revert(req.dataset_urn, resolved_by=req.resolved_by)
+    except (pii_tagger.TaggerError, pii_writer.WriteError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @app.get("/api/ai-config")
 async def get_config() -> dict:
     return {
@@ -660,26 +725,6 @@ class MessageResponse(BaseModel):
     # Used by the frontend to detect an idle session (>10 min since last message)
     # and start a fresh chat.
     created_at: Optional[datetime] = None
-
-
-DB_HOST = os.getenv("DB_HOST", "localhost")
-DB_PORT = int(os.getenv("DB_PORT", 3306))
-DB_USER = os.getenv("DB_USER", "datahub")
-DB_PASSWORD = os.getenv("DB_PASSWORD", "datahub")
-DB_NAME = "datahub"
-
-
-def get_db_connection(include_db: bool = True):
-    """Establishes a connection to MySQL."""
-    config = {
-        "host": DB_HOST,
-        "port": DB_PORT,
-        "user": DB_USER,
-        "password": DB_PASSWORD,
-    }
-    if include_db:
-        config["database"] = DB_NAME
-    return mysql.connector.connect(**config)
 
 
 @app.post("/sessions/{session_id}/messages", response_model=MessageResponse, status_code=status.HTTP_201_CREATED)

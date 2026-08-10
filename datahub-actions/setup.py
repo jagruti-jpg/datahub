@@ -181,6 +181,7 @@ entry_points = {
         "term_propagation = datahub_actions.plugin.action.term.term_propagation_action:TermPropagationAction",
         "snowflake_tag_propagation = datahub_actions.plugin.action.snowflake.tag_propagator:SnowflakeTagPropagatorAction",
         "doc_propagation = datahub_actions.plugin.action.propagation.docs.propagation_action:DocPropagationAction",
+        "pii_autotag = datahub_actions.plugin.action.pii.pii_autotag_action:PiiAutoTagAction",
     ],
     "datahub_actions.transformer.plugins": [],
     "datahub_actions.source.plugins": [],

@@ -11,8 +11,13 @@ from dataclasses import dataclass
 
 PROVENANCE_TAG = "AI-Proposed"
 
-# Below this, a verdict is surfaced as "needs a judgement call" and is not written unless
-# the reviewer explicitly opts in.
+# The single bar for both flows. Below it the interactive flow surfaces a verdict as
+# "needs a judgement call" and will not write it unless the reviewer explicitly opts in,
+# and the automated flow records it without writing.
+#
+# Worth knowing when tuning: measured model confidence on ambiguous columns sits at
+# 0.70-0.80 and moves by about 0.05 between identical runs, so a floor inside that range
+# would decide the same column differently on consecutive ingestions of unchanged data.
 DEFAULT_CONFIDENCE_FLOOR = 0.6
 
 
@@ -117,6 +122,15 @@ def is_taxonomy_tag(urn_or_name: str) -> bool:
     """Whether a tag is ours, so repeat runs can leave a steward's own tags untouched."""
     name = urn_or_name.rsplit(":", 1)[-1]
     return name in BY_NAME or name == PROVENANCE_TAG
+
+
+def is_label_tag(urn_or_name: str) -> bool:
+    """A label specifically, excluding the provenance marker.
+
+    Reverting needs this distinction: the provenance tag is shared by every label the AI
+    put on a column, so it may only be removed once the last of them is gone.
+    """
+    return urn_or_name.rsplit(":", 1)[-1] in BY_NAME
 
 
 def guidance_block() -> str:
